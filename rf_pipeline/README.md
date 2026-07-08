@@ -39,6 +39,30 @@ python demos\demo_pipeline.py `
   --out runs\demo_detect_classify
 ```
 
+The Gradio UI receives default weight paths from launch arguments. These paths
+are only loaded when inference runs:
+
+- Detector default argument: `--detector-weight yolo26n.pt`
+- Classifier default argument: `--classifier-weight mobilenetv3_small.pt`
+
+Example:
+
+```bash
+python demos/gradio_pipeline_app.py --share \
+  --detector-weight /kaggle/working/weights/yolo26n.pt \
+  --classifier-weight /kaggle/working/weights/mobilenetv3_small.pt
+```
+
+Supported classifier filenames/architectures are limited to:
+
+- `convnexttiny.pt`
+- `efficientnetb0.pt`
+- `mobilenetv3_large.pt`
+- `mobilenetv3_small.pt`
+
+Classifier weights can be either Ultralytics classification checkpoints or
+Torchvision checkpoints/state_dicts for those four architectures.
+
 Outputs:
 
 - `spectrogram.png`: static spectrogram.
@@ -85,6 +109,10 @@ python demos/gradio_pipeline_app.py --share
 The UI is a step-by-step workflow: upload `.iq/.dat/.bin`, render a static
 spectrogram or waterfall preview, choose either two-class detection or one-class
 detection plus classification, then review and export JSON/CSV/ZIP outputs.
+Inputs are shown progressively, so classifier controls only appear in
+`Detection 1 class + classification`, local-path controls only appear when
+`Use local file path` is selected, and waterfall controls only appear for
+waterfall output.
 
 Spectrogram controls:
 

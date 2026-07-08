@@ -18,7 +18,7 @@ import shutil
 import sys
 import time
 import zipfile
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import gradio as gr
@@ -34,6 +34,13 @@ from rf_pipeline.preprocessing import BrowserVideoWriter, SpectrogramConfig, iq_
 
 
 APP_RUN_ROOT = ROOT / "runs" / "gradio_pipeline"
+
+
+@dataclass(slots=True)
+class AppConfig:
+    detector_2class_weight: str = "yolo26n.pt"
+    detector_single_class_weight: str = "yolo26n_single.pt"
+    classifier_weight: str = "mobilenetv3_small.pt"
 
 
 def resolve_local_iq_path(raw_value: str) -> Path:
@@ -250,16 +257,59 @@ def render_preview_step(
     return state, f"Preview rendered. Waterfall preview frames: {frame_count}", str(spectrogram_path), video_path
 
 
-def resolve_model_file(upload_path: str | None, text_path: str) -> Path | None:
-    if upload_path:
+def resolve_detector_weight(source: str, default_path: str, upload_path: str | None, custom_path: str) -> Path:
+    if source == "Use local default":
+        return resolve_weight_reference(default_path, "detector")
+    if source == "Upload weight":
+        if not upload_path:
+            raise gr.Error("Please upload detector weight, or choose local default/custom path.")
         return Path(upload_path)
-    text_path = text_path.strip().strip("\"'")
-    if text_path:
-        path = Path(text_path)
-        if not path.is_file():
-            raise FileNotFoundError(f"Model file not found: {path}")
+    return resolve_existing_weight_path(custom_path, "detector")
+
+
+def select_detector_default_weight(
+    pipeline_mode: str,
+    detector_2class_default_path: str,
+    detector_single_class_default_path: str,
+) -> str:
+    if pipeline_mode == "Detection 1 class + classification":
+        return detector_single_class_default_path
+    return detector_2class_default_path
+
+
+def resolve_classifier_weight(source: str, default_path: str, upload_path: str | None, custom_path: str) -> Path:
+    if source == "Use local weight":
+        return resolve_weight_reference(default_path, "classifier")
+    if source == "Upload weight":
+        if not upload_path:
+            raise gr.Error("Please upload classifier weight, or choose local/custom path.")
+        return Path(upload_path)
+    return resolve_existing_weight_path(custom_path, "classifier")
+
+
+def resolve_weight_reference(value: str, role: str) -> Path:
+    text = str(value).strip().strip("\"'")
+    if not text:
+        raise gr.Error(f"No default {role} weight path was provided when launching the app.")
+    path = Path(text).expanduser()
+    if path.is_file():
         return path
-    return None
+    if role == "detector" and not path.is_absolute() and path.name == text:
+        return path
+    raise FileNotFoundError(
+        f"Default {role} weight not found: {path}\n"
+        f"Launch with --{role}-weight /path/to/weight.pt, or choose Upload weight/Custom path in the UI."
+    )
+
+
+def resolve_existing_weight_path(text_path: str, role: str) -> Path:
+    text_path = text_path.strip().strip("\"'")
+    if not text_path:
+        raise gr.Error(f"Please provide a {role} weight path.")
+    path = Path(text_path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"{role.capitalize()} weight not found: {path}")
+    return path
 
 
 def write_outputs(result, run_dir: Path, pipeline_mode: str, inference_source: str) -> tuple[Path, Path, Path, pd.DataFrame]:
@@ -307,8 +357,13 @@ def write_outputs(result, run_dir: Path, pipeline_mode: str, inference_source: s
 def inference_step(
     state: dict,
     pipeline_mode: str,
+    detector_source: str,
+    detector_2class_default_path: str,
+    detector_single_class_default_path: str,
     detector_upload: str | None,
     detector_path_text: str,
+    classifier_source: str,
+    classifier_default_path: str,
     classifier_upload: str | None,
     classifier_path_text: str,
     architecture: str,
@@ -329,10 +384,20 @@ def inference_step(
     run_dir = Path(state["run_dir"])
     metadata = IQMetadata(**state["metadata"])
     preprocess = state["preprocess"]
-    detector_weights = resolve_model_file(detector_upload, detector_path_text)
+    detector_default_path = select_detector_default_weight(
+        pipeline_mode,
+        detector_2class_default_path,
+        detector_single_class_default_path,
+    )
+    detector_weights = resolve_detector_weight(detector_source, detector_default_path, detector_upload, detector_path_text)
     classifier_weights = None
     if pipeline_mode == "Detection 1 class + classification":
-        classifier_weights = resolve_model_file(classifier_upload, classifier_path_text)
+        classifier_weights = resolve_classifier_weight(
+            classifier_source,
+            classifier_default_path,
+            classifier_upload,
+            classifier_path_text,
+        )
 
     segment_samples = max(int(preprocess["segment_duration_sec"] * metadata.sample_rate_hz), preprocess["stft_point"])
     hop_samples = max(int(preprocess["segment_hop_sec"] * metadata.sample_rate_hz), 1)
@@ -385,7 +450,8 @@ def inference_step(
     )
 
 
-def build_app() -> gr.Blocks:
+def build_app(config: AppConfig | None = None) -> gr.Blocks:
+    config = config or AppConfig()
     with gr.Blocks(title="RF IQ Pipeline Demo") as app:
         state = gr.State({})
         gr.Markdown(
@@ -396,14 +462,16 @@ def build_app() -> gr.Blocks:
 
         with gr.Tab("1. IQ Input"):
             input_source = gr.Radio(["Upload file", "Use local file path"], value="Upload file", label="Input source")
-            iq_upload = gr.File(label="Raw IQ file", file_types=[".iq", ".dat", ".bin"], type="filepath")
-            local_iq_path = gr.Textbox(label="Local IQ path", placeholder="/kaggle/working/sample.iq")
+            with gr.Group(visible=True) as upload_group:
+                iq_upload = gr.File(label="Raw IQ file", file_types=[".iq", ".dat", ".bin"], type="filepath")
+            with gr.Group(visible=False) as local_path_group:
+                local_iq_path = gr.Textbox(label="Local IQ path", placeholder="/kaggle/working/sample.iq")
             with gr.Row():
                 dtype = gr.Dropdown(["float32", "int16", "complex64"], value="float32", label="IQ dtype")
                 sample_rate = gr.Number(value=100_000_000, label="Sample rate (Hz)")
                 center_frequency = gr.Number(value=2_400_000_000, label="Center frequency (Hz)")
             trim_enabled = gr.Checkbox(value=True, label="Use only a smaller time segment")
-            with gr.Row():
+            with gr.Row(visible=True) as trim_group:
                 trim_start = gr.Number(value=0.0, label="Start time (sec)")
                 trim_duration = gr.Number(value=0.03, label="Duration (sec)")
             load_button = gr.Button("Save IQ and continue", variant="primary")
@@ -419,11 +487,11 @@ def build_app() -> gr.Blocks:
             with gr.Row():
                 image_width = gr.Number(value=960, label="Image width")
                 image_height = gr.Number(value=720, label="Image height")
-            with gr.Row():
+            with gr.Row(visible=True) as segment_controls_group:
                 segment_duration = gr.Number(value=0.03, label="Segment duration (sec)")
                 segment_hop = gr.Number(value=0.01, label="Segment step / hop (sec)")
                 output_video_fps = gr.Number(value=24, label="Output video FPS")
-            gr.Markdown(
+            segment_help = gr.Markdown(
                 "- Segment duration: each IQ chunk becomes one spectrogram and one video frame.\n"
                 "- Segment step / hop: use a smaller value than duration for overlapping chunks and smoother video.\n"
                 "- Output video FPS: playback FPS of the stitched video; it does not change inference windows."
@@ -436,22 +504,46 @@ def build_app() -> gr.Blocks:
 
         with gr.Tab("3. Inference"):
             pipeline_mode = gr.Radio(["Detection 2 classes", "Detection 1 class + classification"], value="Detection 2 classes", label="Inference mode")
-            with gr.Row():
+            detector_source = gr.Radio(
+                ["Use local default", "Upload weight", "Custom path"],
+                value="Use local default",
+                label="Detector weight source",
+            )
+            detector_2class_default_path = gr.Textbox(value=config.detector_2class_weight, visible=False)
+            detector_single_class_default_path = gr.Textbox(value=config.detector_single_class_weight, visible=False)
+            detector_local_info = gr.Markdown(
+                f"Default 2-class detector from launch arg: `{config.detector_2class_weight}`"
+            )
+            with gr.Group(visible=False) as detector_upload_group:
                 detector_upload = gr.File(label="Detector .pt", file_types=[".pt"], type="filepath")
-                detector_path = gr.Textbox(label="Or detector path")
-            with gr.Row():
-                classifier_upload = gr.File(label="Classifier .pt", file_types=[".pt"], type="filepath")
-                classifier_path = gr.Textbox(label="Or classifier path")
-            inference_source = gr.Radio(
-                ["Static spectrogram", "Segment spectrograms -> stitched waterfall"],
-                value="Segment spectrograms -> stitched waterfall",
-                label="Inference source",
-            )
-            waterfall_overlay_mode = gr.Radio(
-                ["Map static detections to video", "Detect every waterfall frame"],
-                value="Map static detections to video",
-                label="Waterfall overlay mode for static inference",
-            )
+            with gr.Group(visible=False) as detector_custom_group:
+                detector_path = gr.Textbox(label="Detector custom path", placeholder="/kaggle/working/weights/yolo26n.pt")
+            with gr.Row(visible=False) as classifier_group:
+                classifier_source = gr.Radio(
+                    ["Use local weight", "Upload weight", "Custom path"],
+                    value="Use local weight",
+                    label="Classifier weight source",
+                )
+                classifier_default_path = gr.Textbox(value=config.classifier_weight, visible=False)
+                classifier_local_info = gr.Markdown(
+                    f"Default classifier from launch arg: `{config.classifier_weight}`"
+                )
+                with gr.Group(visible=False) as classifier_upload_group:
+                    classifier_upload = gr.File(label="Classifier .pt", file_types=[".pt"], type="filepath")
+                with gr.Group(visible=False) as classifier_custom_group:
+                    classifier_path = gr.Textbox(label="Classifier custom path", placeholder="/kaggle/working/weights/mobilenetv3_small.pt")
+            with gr.Group(visible=True) as inference_source_group:
+                inference_source = gr.Radio(
+                    ["Static spectrogram", "Segment spectrograms -> stitched waterfall"],
+                    value="Segment spectrograms -> stitched waterfall",
+                    label="Inference source",
+                )
+            with gr.Group(visible=False) as waterfall_overlay_group:
+                waterfall_overlay_mode = gr.Radio(
+                    ["Map static detections to video", "Detect every waterfall frame"],
+                    value="Map static detections to video",
+                    label="Waterfall overlay mode for static inference",
+                )
             with gr.Row():
                 architecture = gr.Dropdown(["auto", "yolo", "rtdetr"], value="auto", label="Detector architecture")
                 imgsz = gr.Dropdown([320, 512, 640, 768, 1024], value=640, label="Image size")
@@ -472,7 +564,51 @@ def build_app() -> gr.Blocks:
             with gr.Row():
                 json_file = gr.File(label="Download JSON")
                 csv_file = gr.File(label="Download CSV")
-                zip_file = gr.File(label="Download all outputs")
+            zip_file = gr.File(label="Download all outputs")
+
+        input_source.change(
+            toggle_input_source,
+            inputs=[input_source],
+            outputs=[upload_group, local_path_group],
+        )
+        trim_enabled.change(
+            toggle_trim,
+            inputs=[trim_enabled],
+            outputs=[trim_start, trim_duration],
+        )
+        output_mode.change(
+            toggle_render_output,
+            inputs=[output_mode],
+            outputs=[
+                segment_controls_group,
+                segment_help,
+                preview_video,
+                detection_video,
+                inference_source_group,
+                inference_source,
+                waterfall_overlay_group,
+            ],
+        )
+        pipeline_mode.change(
+            toggle_pipeline_mode,
+            inputs=[pipeline_mode, detector_2class_default_path, detector_single_class_default_path],
+            outputs=[classifier_group, detector_local_info],
+        )
+        detector_source.change(
+            toggle_weight_source,
+            inputs=[detector_source],
+            outputs=[detector_local_info, detector_upload_group, detector_custom_group],
+        )
+        classifier_source.change(
+            toggle_weight_source,
+            inputs=[classifier_source],
+            outputs=[classifier_local_info, classifier_upload_group, classifier_custom_group],
+        )
+        inference_source.change(
+            toggle_inference_source,
+            inputs=[inference_source],
+            outputs=[waterfall_overlay_group],
+        )
 
         load_button.click(
             load_iq_step,
@@ -501,8 +637,13 @@ def build_app() -> gr.Blocks:
             inputs=[
                 state,
                 pipeline_mode,
+                detector_source,
+                detector_2class_default_path,
+                detector_single_class_default_path,
                 detector_upload,
                 detector_path,
+                classifier_source,
+                classifier_default_path,
                 classifier_upload,
                 classifier_path,
                 architecture,
@@ -520,17 +661,95 @@ def build_app() -> gr.Blocks:
     return app
 
 
+def toggle_input_source(input_source: str):
+    return (
+        gr.update(visible=input_source == "Upload file"),
+        gr.update(visible=input_source == "Use local file path"),
+    )
+
+
+def toggle_trim(trim_enabled: bool):
+    return (
+        gr.update(visible=trim_enabled),
+        gr.update(visible=trim_enabled),
+    )
+
+
+def toggle_render_output(output_mode: str):
+    is_waterfall = output_mode.startswith("Waterfall")
+    return (
+        gr.update(visible=is_waterfall),
+        gr.update(visible=is_waterfall),
+        gr.update(visible=is_waterfall),
+        gr.update(visible=is_waterfall),
+        gr.update(visible=is_waterfall),
+        gr.update(value="Segment spectrograms -> stitched waterfall" if is_waterfall else "Static spectrogram"),
+        gr.update(visible=False),
+    )
+
+
+def toggle_pipeline_mode(pipeline_mode: str, detector_2class_default_path: str, detector_single_class_default_path: str):
+    if pipeline_mode == "Detection 1 class + classification":
+        return (
+            gr.update(visible=True),
+            gr.update(value=f"Default single-class detector from launch arg: `{detector_single_class_default_path}`"),
+        )
+    return (
+        gr.update(visible=False),
+        gr.update(value=f"Default 2-class detector from launch arg: `{detector_2class_default_path}`"),
+    )
+
+
+def toggle_weight_source(source: str):
+    is_local = source.startswith("Use local")
+    is_upload = source == "Upload weight"
+    is_custom = source == "Custom path"
+    return (
+        gr.update(visible=is_local),
+        gr.update(visible=is_upload),
+        gr.update(visible=is_custom),
+    )
+
+
+def toggle_inference_source(inference_source: str):
+    is_static = inference_source == "Static spectrogram"
+    return gr.update(visible=is_static)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Gradio RF IQ pipeline UI.")
     parser.add_argument("--share", action="store_true", help="Create a public Gradio URL. Useful on Kaggle.")
     parser.add_argument("--server-name", default="0.0.0.0")
     parser.add_argument("--server-port", type=int, default=7860)
+    parser.add_argument(
+        "--detector-2class-weight",
+        "--detector-weight",
+        dest="detector_2class_weight",
+        default="yolo26n.pt",
+        help="Default 2-class detector weight path/name. Loaded only when inference runs in 2-class mode.",
+    )
+    parser.add_argument(
+        "--detector-single-class-weight",
+        default="yolo26n_single.pt",
+        help="Default single-class detector weight path/name. Loaded only when inference runs with second-stage classification.",
+    )
+    parser.add_argument(
+        "--classifier-weight",
+        default="mobilenetv3_small.pt",
+        help="Default classifier weight path used by the UI. Loaded only when classification runs.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    build_app().queue().launch(
+    build_app(
+        AppConfig(
+            detector_2class_weight=args.detector_2class_weight,
+            detector_single_class_weight=args.detector_single_class_weight,
+            classifier_weight=args.classifier_weight,
+        )
+    ).queue().launch(
         share=args.share,
         server_name=args.server_name,
         server_port=args.server_port,
