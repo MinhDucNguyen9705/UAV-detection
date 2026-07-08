@@ -44,6 +44,7 @@ class PipelineConfig:
     waterfall_detection_mode: str = "map_static"
     video_window_samples: int = 32768
     video_hop_samples: int = 8192
+    video_fps: float = 24.0
 
 
 @dataclass(slots=True)
@@ -85,6 +86,7 @@ def run_pipeline(iq_path: Path, metadata: IQMetadata, config: PipelineConfig) ->
     waterfall_config = WaterfallConfig(
         window_samples=config.video_window_samples,
         hop_samples=config.video_hop_samples,
+        fps=config.video_fps,
     )
     if config.save_video:
         candidate_video_path = config.output_dir / "waterfall.mp4"
@@ -200,6 +202,7 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
     waterfall_config = WaterfallConfig(
         window_samples=config.video_window_samples,
         hop_samples=config.video_hop_samples,
+        fps=config.video_fps,
     )
 
     if config.detector_weights:

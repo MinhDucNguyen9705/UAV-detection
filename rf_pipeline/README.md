@@ -69,13 +69,20 @@ the UI and in `pipeline_result.json`. For `Segment spectrograms -> stitched
 waterfall`, FPS is computed only over batched detector inference time, not IQ
 disk IO, rendering, video encoding, or CSV/JSON export.
 
-## UI Demo
+## Gradio UI Demo
 
 ```powershell
-streamlit run demos\ui_pipeline_app.py
+python demos\gradio_pipeline_app.py
 ```
 
-The UI is a step-by-step wizard: upload `.iq/.dat/.bin`, render a static
+On Kaggle or another remote notebook, use Gradio share mode and open the public
+URL printed by Gradio:
+
+```bash
+python demos/gradio_pipeline_app.py --share
+```
+
+The UI is a step-by-step workflow: upload `.iq/.dat/.bin`, render a static
 spectrogram or waterfall preview, choose either two-class detection or one-class
 detection plus classification, then review and export JSON/CSV/ZIP outputs.
 
@@ -90,13 +97,16 @@ Spectrogram controls:
   RFUAV training renderer.
 - `Segment duration`: duration of each IQ chunk rendered into one spectrogram
   image and one video frame.
-- `Segment step / hop`: time shift between segment starts. Set it equal to
-  segment duration for non-overlapping equal chunks.
+- `Segment step / hop`: time shift between segment starts. Use a smaller value
+  than segment duration for overlapping chunks and smoother video. The Gradio
+  default is `duration=0.03s`, `hop=0.01s`.
+- `Output video FPS`: playback frame rate of the stitched video. It does not
+  change the IQ windows used for inference. The default is `24`.
 
 For large IQ files, prefer `Use local file path` in Step 1 and enable `Use only
 a smaller time segment`. This copies only the selected byte range into the run
-folder before rendering. Browser upload can also be increased if needed:
+folder before rendering.
 
-```powershell
-streamlit run demos\ui_pipeline_app.py --server.maxUploadSize 1024
-```
+On Kaggle/Linux, use forward-slash paths such as
+`/kaggle/working/DJI MAVIC3 PRO/.../pack1_0-1s.iq`. The UI also normalizes
+common copied Windows-style paths like `\kaggle\working\...`.
