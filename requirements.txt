@@ -1,0 +1,13 @@
+numpy>=1.26
+scipy>=1.11
+opencv-python>=4.8
+matplotlib>=3.8
+pandas>=2.1
+streamlit>=1.36
+ultralytics>=8.2
+torch>=2.2
+torchvision>=0.17
+PyYAML>=6.0
+tqdm>=4.66
+huggingface-hub>=0.23
+rarfile>=4.2
