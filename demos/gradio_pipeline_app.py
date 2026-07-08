@@ -460,111 +460,112 @@ def build_app(config: AppConfig | None = None) -> gr.Blocks:
             "run batched detection, estimate parameters, and export outputs."
         )
 
-        with gr.Tab("1. IQ Input"):
-            input_source = gr.Radio(["Upload file", "Use local file path"], value="Upload file", label="Input source")
-            with gr.Group(visible=True) as upload_group:
-                iq_upload = gr.File(label="Raw IQ file", file_types=[".iq", ".dat", ".bin"], type="filepath")
-            with gr.Group(visible=False) as local_path_group:
-                local_iq_path = gr.Textbox(label="Local IQ path", placeholder="/kaggle/working/sample.iq")
-            with gr.Row():
-                dtype = gr.Dropdown(["float32", "int16", "complex64"], value="float32", label="IQ dtype")
-                sample_rate = gr.Number(value=100_000_000, label="Sample rate (Hz)")
-                center_frequency = gr.Number(value=2_400_000_000, label="Center frequency (Hz)")
-            trim_enabled = gr.Checkbox(value=True, label="Use only a smaller time segment")
-            with gr.Row(visible=True) as trim_group:
-                trim_start = gr.Number(value=0.0, label="Start time (sec)")
-                trim_duration = gr.Number(value=0.03, label="Duration (sec)")
-            load_button = gr.Button("Save IQ and continue", variant="primary")
-            load_status = gr.Markdown()
+        with gr.Tabs(selected="iq_input") as tabs:
+            with gr.Tab("1. IQ Input", id="iq_input"):
+                input_source = gr.Radio(["Upload file", "Use local file path"], value="Upload file", label="Input source")
+                with gr.Group(visible=True) as upload_group:
+                    iq_upload = gr.File(label="Raw IQ file", file_types=[".iq", ".dat", ".bin"], type="filepath")
+                with gr.Group(visible=False) as local_path_group:
+                    local_iq_path = gr.Textbox(label="Local IQ path", placeholder="/kaggle/working/sample.iq")
+                with gr.Row():
+                    dtype = gr.Dropdown(["float32", "int16", "complex64"], value="float32", label="IQ dtype")
+                    sample_rate = gr.Number(value=100_000_000, label="Sample rate (Hz)")
+                    center_frequency = gr.Number(value=2_400_000_000, label="Center frequency (Hz)")
+                trim_enabled = gr.Checkbox(value=True, label="Use only a smaller time segment")
+                with gr.Row(visible=True) as trim_group:
+                    trim_start = gr.Number(value=0.0, label="Start time (sec)")
+                    trim_duration = gr.Number(value=0.03, label="Duration (sec)")
+                load_button = gr.Button("Save IQ and continue", variant="primary")
+                load_status = gr.Markdown()
 
-        with gr.Tab("2. Spectrogram / Waterfall Preview"):
-            output_mode = gr.Radio(["Static image", "Waterfall video + static image"], value="Waterfall video + static image", label="Render output")
-            render_mode = gr.Radio(["Train-compatible Matplotlib", "Fast OpenCV preview"], value="Train-compatible Matplotlib", label="Render mode")
-            with gr.Row():
-                stft_point = gr.Dropdown([128, 256, 512, 1024, 2048, 4096, 8192, 16384], value=16384, label="STFT point")
-                dynamic_range = gr.Slider(20, 120, value=70, step=5, label="Dynamic range (dB)")
-                colormap = gr.Dropdown(["hot", "jet", "turbo", "viridis", "gray"], value="hot", label="Colormap")
-            with gr.Row():
-                image_width = gr.Number(value=960, label="Image width")
-                image_height = gr.Number(value=720, label="Image height")
-            with gr.Row(visible=True) as segment_controls_group:
-                segment_duration = gr.Number(value=0.03, label="Segment duration (sec)")
-                segment_hop = gr.Number(value=0.01, label="Segment step / hop (sec)")
-                output_video_fps = gr.Number(value=24, label="Output video FPS")
-            segment_help = gr.Markdown(
-                "- Segment duration: each IQ chunk becomes one spectrogram and one video frame.\n"
-                "- Segment step / hop: use a smaller value than duration for overlapping chunks and smoother video.\n"
-                "- Output video FPS: playback FPS of the stitched video; it does not change inference windows."
-            )
-            preview_button = gr.Button("Generate preview", variant="primary")
-            preview_status = gr.Markdown()
-            with gr.Row():
-                preview_image = gr.Image(label="Spectrogram preview", type="filepath")
-                preview_video = gr.Video(label="Waterfall preview")
+            with gr.Tab("2. Spectrogram / Waterfall Preview", id="preview"):
+                output_mode = gr.Radio(["Static image", "Waterfall video + static image"], value="Waterfall video + static image", label="Render output")
+                render_mode = gr.Radio(["Train-compatible Matplotlib", "Fast OpenCV preview"], value="Train-compatible Matplotlib", label="Render mode")
+                with gr.Row():
+                    stft_point = gr.Dropdown([128, 256, 512, 1024, 2048, 4096, 8192, 16384], value=16384, label="STFT point")
+                    dynamic_range = gr.Slider(20, 120, value=70, step=5, label="Dynamic range (dB)")
+                    colormap = gr.Dropdown(["hot", "jet", "turbo", "viridis", "gray"], value="hot", label="Colormap")
+                with gr.Row():
+                    image_width = gr.Number(value=960, label="Image width")
+                    image_height = gr.Number(value=720, label="Image height")
+                with gr.Row(visible=True) as segment_controls_group:
+                    segment_duration = gr.Number(value=0.03, label="Segment duration (sec)")
+                    segment_hop = gr.Number(value=0.01, label="Segment step / hop (sec)")
+                    output_video_fps = gr.Number(value=24, label="Output video FPS")
+                segment_help = gr.Markdown(
+                    "- Segment duration: each IQ chunk becomes one spectrogram and one video frame.\n"
+                    "- Segment step / hop: use a smaller value than duration for overlapping chunks and smoother video.\n"
+                    "- Output video FPS: playback FPS of the stitched video; it does not change inference windows."
+                )
+                preview_button = gr.Button("Generate preview", variant="primary")
+                preview_status = gr.Markdown()
+                with gr.Row():
+                    preview_image = gr.Image(label="Spectrogram preview", type="filepath")
+                    preview_video = gr.Video(label="Waterfall preview")
 
-        with gr.Tab("3. Inference"):
-            pipeline_mode = gr.Radio(["Detection 2 classes", "Detection 1 class + classification"], value="Detection 2 classes", label="Inference mode")
-            detector_source = gr.Radio(
-                ["Use local default", "Upload weight", "Custom path"],
-                value="Use local default",
-                label="Detector weight source",
-            )
-            detector_2class_default_path = gr.Textbox(value=config.detector_2class_weight, visible=False)
-            detector_single_class_default_path = gr.Textbox(value=config.detector_single_class_weight, visible=False)
-            detector_local_info = gr.Markdown(
-                f"Default 2-class detector from launch arg: `{config.detector_2class_weight}`"
-            )
-            with gr.Group(visible=False) as detector_upload_group:
-                detector_upload = gr.File(label="Detector .pt", file_types=[".pt"], type="filepath")
-            with gr.Group(visible=False) as detector_custom_group:
-                detector_path = gr.Textbox(label="Detector custom path", placeholder="/kaggle/working/weights/yolo26n.pt")
-            with gr.Row(visible=False) as classifier_group:
-                classifier_source = gr.Radio(
-                    ["Use local weight", "Upload weight", "Custom path"],
-                    value="Use local weight",
-                    label="Classifier weight source",
+            with gr.Tab("3. Inference", id="inference"):
+                pipeline_mode = gr.Radio(["Detection 2 classes", "Detection 1 class + classification"], value="Detection 2 classes", label="Inference mode")
+                detector_source = gr.Radio(
+                    ["Use local default", "Upload weight", "Custom path"],
+                    value="Use local default",
+                    label="Detector weight source",
                 )
-                classifier_default_path = gr.Textbox(value=config.classifier_weight, visible=False)
-                classifier_local_info = gr.Markdown(
-                    f"Default classifier from launch arg: `{config.classifier_weight}`"
+                detector_2class_default_path = gr.Textbox(value=config.detector_2class_weight, visible=False)
+                detector_single_class_default_path = gr.Textbox(value=config.detector_single_class_weight, visible=False)
+                detector_local_info = gr.Markdown(
+                    f"Default 2-class detector from launch arg: `{config.detector_2class_weight}`"
                 )
-                with gr.Group(visible=False) as classifier_upload_group:
-                    classifier_upload = gr.File(label="Classifier .pt", file_types=[".pt"], type="filepath")
-                with gr.Group(visible=False) as classifier_custom_group:
-                    classifier_path = gr.Textbox(label="Classifier custom path", placeholder="/kaggle/working/weights/mobilenetv3_small.pt")
-            with gr.Group(visible=True) as inference_source_group:
-                inference_source = gr.Radio(
-                    ["Static spectrogram", "Segment spectrograms -> stitched waterfall"],
-                    value="Segment spectrograms -> stitched waterfall",
-                    label="Inference source",
-                )
-            with gr.Group(visible=False) as waterfall_overlay_group:
-                waterfall_overlay_mode = gr.Radio(
-                    ["Map static detections to video", "Detect every waterfall frame"],
-                    value="Map static detections to video",
-                    label="Waterfall overlay mode for static inference",
-                )
-            with gr.Row():
-                architecture = gr.Dropdown(["auto", "yolo", "rtdetr"], value="auto", label="Detector architecture")
-                imgsz = gr.Dropdown([320, 512, 640, 768, 1024], value=640, label="Image size")
-                batch_size = gr.Number(value=16, precision=0, label="Inference batch size")
-            with gr.Row():
-                conf = gr.Slider(0, 1, value=0.25, step=0.01, label="Confidence")
-                iou = gr.Slider(0, 1, value=0.70, step=0.01, label="IoU")
-                device = gr.Textbox(label="Device", placeholder="empty, cpu, 0")
-            infer_button = gr.Button("Run detection and estimate", variant="primary")
+                with gr.Group(visible=False) as detector_upload_group:
+                    detector_upload = gr.File(label="Detector .pt", file_types=[".pt"], type="filepath")
+                with gr.Group(visible=False) as detector_custom_group:
+                    detector_path = gr.Textbox(label="Detector custom path", placeholder="/kaggle/working/weights/yolo26n.pt")
+                with gr.Row(visible=False) as classifier_group:
+                    classifier_source = gr.Radio(
+                        ["Use local weight", "Upload weight", "Custom path"],
+                        value="Use local weight",
+                        label="Classifier weight source",
+                    )
+                    classifier_default_path = gr.Textbox(value=config.classifier_weight, visible=False)
+                    classifier_local_info = gr.Markdown(
+                        f"Default classifier from launch arg: `{config.classifier_weight}`"
+                    )
+                    with gr.Group(visible=False) as classifier_upload_group:
+                        classifier_upload = gr.File(label="Classifier .pt", file_types=[".pt"], type="filepath")
+                    with gr.Group(visible=False) as classifier_custom_group:
+                        classifier_path = gr.Textbox(label="Classifier custom path", placeholder="/kaggle/working/weights/mobilenetv3_small.pt")
+                with gr.Group(visible=True) as inference_source_group:
+                    inference_source = gr.Radio(
+                        ["Static spectrogram", "Segment spectrograms -> stitched waterfall"],
+                        value="Segment spectrograms -> stitched waterfall",
+                        label="Inference source",
+                    )
+                with gr.Group(visible=False) as waterfall_overlay_group:
+                    waterfall_overlay_mode = gr.Radio(
+                        ["Map static detections to video", "Detect every waterfall frame"],
+                        value="Map static detections to video",
+                        label="Waterfall overlay mode for static inference",
+                    )
+                with gr.Row():
+                    architecture = gr.Dropdown(["auto", "yolo", "rtdetr"], value="auto", label="Detector architecture")
+                    imgsz = gr.Dropdown([320, 512, 640, 768, 1024], value=640, label="Image size")
+                    batch_size = gr.Number(value=16, precision=0, label="Inference batch size")
+                with gr.Row():
+                    conf = gr.Slider(0, 1, value=0.25, step=0.01, label="Confidence")
+                    iou = gr.Slider(0, 1, value=0.70, step=0.01, label="IoU")
+                    device = gr.Textbox(label="Device", placeholder="empty, cpu, 0")
+                infer_button = gr.Button("Run detection and estimate", variant="primary")
 
-        with gr.Tab("4. Results / Export"):
-            infer_status = gr.Markdown()
-            with gr.Row():
-                overlay_image = gr.Image(label="Detection overlay", type="filepath")
-                detection_video = gr.Video(label="Waterfall detections")
-            estimates = gr.Dataframe(label="Signal estimates")
-            perf_json = gr.JSON(label="Performance")
-            with gr.Row():
-                json_file = gr.File(label="Download JSON")
-                csv_file = gr.File(label="Download CSV")
-            zip_file = gr.File(label="Download all outputs")
+            with gr.Tab("4. Results / Export", id="results"):
+                infer_status = gr.Markdown()
+                with gr.Row():
+                    overlay_image = gr.Image(label="Detection overlay", type="filepath")
+                    detection_video = gr.Video(label="Waterfall detections")
+                estimates = gr.Dataframe(label="Signal estimates")
+                perf_json = gr.JSON(label="Performance")
+                with gr.Row():
+                    json_file = gr.File(label="Download JSON")
+                    csv_file = gr.File(label="Download CSV")
+                zip_file = gr.File(label="Download all outputs")
 
         input_source.change(
             toggle_input_source,
@@ -610,11 +611,12 @@ def build_app(config: AppConfig | None = None) -> gr.Blocks:
             outputs=[waterfall_overlay_group],
         )
 
-        load_button.click(
+        load_event = load_button.click(
             load_iq_step,
             inputs=[input_source, iq_upload, local_iq_path, dtype, sample_rate, center_frequency, trim_enabled, trim_start, trim_duration],
             outputs=[state, load_status],
         )
+        load_event.success(select_preview_tab, outputs=[tabs])
         preview_button.click(
             render_preview_step,
             inputs=[
@@ -632,7 +634,7 @@ def build_app(config: AppConfig | None = None) -> gr.Blocks:
             ],
             outputs=[state, preview_status, preview_image, preview_video],
         )
-        infer_button.click(
+        infer_event = infer_button.click(
             inference_step,
             inputs=[
                 state,
@@ -658,6 +660,7 @@ def build_app(config: AppConfig | None = None) -> gr.Blocks:
             ],
             outputs=[state, infer_status, overlay_image, detection_video, estimates, perf_json, json_file, csv_file, zip_file],
         )
+        infer_event.success(select_results_tab, outputs=[tabs])
     return app
 
 
@@ -666,6 +669,14 @@ def toggle_input_source(input_source: str):
         gr.update(visible=input_source == "Upload file"),
         gr.update(visible=input_source == "Use local file path"),
     )
+
+
+def select_preview_tab():
+    return gr.update(selected="preview")
+
+
+def select_results_tab():
+    return gr.update(selected="results")
 
 
 def toggle_trim(trim_enabled: bool):

@@ -17,8 +17,15 @@ class ClassificationResult:
 class NullClassifier:
     """Returns the detector class when no second-stage classifier is configured."""
 
-    def classify_crop(self, image_path: Path, xyxy: tuple[float, float, float, float], fallback_name: str) -> ClassificationResult:
-        return ClassificationResult(class_id=0, class_name=fallback_name, confidence=1.0)
+    def classify_crop(
+        self,
+        image_path: Path,
+        xyxy: tuple[float, float, float, float],
+        fallback_name: str,
+        fallback_class_id: int = 0,
+        fallback_confidence: float = 1.0,
+    ) -> ClassificationResult:
+        return ClassificationResult(class_id=fallback_class_id, class_name=fallback_name, confidence=fallback_confidence)
 
 
 class ImageClassifier:
@@ -106,7 +113,14 @@ class ImageClassifier:
             ]
         )
 
-    def classify_crop(self, image_path: Path, xyxy: tuple[float, float, float, float], fallback_name: str) -> ClassificationResult:
+    def classify_crop(
+        self,
+        image_path: Path,
+        xyxy: tuple[float, float, float, float],
+        fallback_name: str,
+        fallback_class_id: int = 0,
+        fallback_confidence: float = 0.0,
+    ) -> ClassificationResult:
         import cv2
 
         image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
@@ -119,22 +133,34 @@ class ImageClassifier:
         y1 = min(max(y1, 0), height)
         y2 = min(max(y2, 0), height)
         if x2 <= x1 or y2 <= y1:
-            return ClassificationResult(class_id=0, class_name=fallback_name, confidence=0.0)
+            return ClassificationResult(class_id=fallback_class_id, class_name=fallback_name, confidence=fallback_confidence)
         crop = image[y1:y2, x1:x2]
         if self.backend == "torchvision":
-            return self._classify_torchvision(crop, fallback_name)
-        return self._classify_ultralytics(crop, fallback_name)
+            return self._classify_torchvision(crop, fallback_name, fallback_class_id, fallback_confidence)
+        return self._classify_ultralytics(crop, fallback_name, fallback_class_id, fallback_confidence)
 
-    def _classify_ultralytics(self, crop, fallback_name: str) -> ClassificationResult:
+    def _classify_ultralytics(
+        self,
+        crop,
+        fallback_name: str,
+        fallback_class_id: int,
+        fallback_confidence: float,
+    ) -> ClassificationResult:
         result = self.model.predict(crop, imgsz=self.imgsz, device=self.device, verbose=False)[0]
         probs = getattr(result, "probs", None)
         if probs is None:
-            return ClassificationResult(class_id=0, class_name=fallback_name, confidence=0.0)
+            return ClassificationResult(class_id=fallback_class_id, class_name=fallback_name, confidence=fallback_confidence)
         class_id = int(probs.top1)
         confidence = float(probs.top1conf)
         return ClassificationResult(class_id=class_id, class_name=self.names.get(class_id, str(class_id)), confidence=confidence)
 
-    def _classify_torchvision(self, crop, fallback_name: str) -> ClassificationResult:
+    def _classify_torchvision(
+        self,
+        crop,
+        fallback_name: str,
+        fallback_class_id: int,
+        fallback_confidence: float,
+    ) -> ClassificationResult:
         import cv2
         import torch
 
@@ -147,7 +173,7 @@ class ImageClassifier:
         index = int(class_id.item())
         return ClassificationResult(
             class_id=index,
-            class_name=self.names.get(index, fallback_name if index == 0 else str(index)),
+            class_name=self.names.get(index, fallback_name if index == fallback_class_id else str(index)),
             confidence=float(confidence.item()),
         )
 

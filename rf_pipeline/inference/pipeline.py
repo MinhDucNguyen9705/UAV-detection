@@ -118,7 +118,13 @@ def run_pipeline(iq_path: Path, metadata: IQMetadata, config: PipelineConfig) ->
     raw_detections = detector.predict([spectrogram_path])[spectrogram_path]
     infer_elapsed = time.perf_counter() - infer_start
     for detection in raw_detections:
-        classification = classifier.classify_crop(spectrogram_path, detection.xyxy, detection.class_name)
+        classification = classifier.classify_crop(
+            spectrogram_path,
+            detection.xyxy,
+            detection.class_name,
+            detection.class_id,
+            detection.confidence,
+        )
         estimate = estimate_parameters(
             detection.xyxy,
             image_width=image_width,
@@ -148,6 +154,7 @@ def run_pipeline(iq_path: Path, metadata: IQMetadata, config: PipelineConfig) ->
                 spectrogram_config=spectrogram_config,
                 waterfall_config=waterfall_config,
                 detector=detector,
+                classifier=classifier,
             )
         else:
             frame_count = _save_mapped_waterfall_detection_video(
@@ -256,7 +263,13 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
             frame_start_sec = metadata.start_time_sec + record["start_sample"] / metadata.sample_rate_hz
             frame_end_sec = frame_start_sec + waterfall_config.window_samples / metadata.sample_rate_hz
             for detection in predictions.get(record["path"], []):
-                classification = classifier.classify_crop(record["path"], detection.xyxy, detection.class_name)
+                classification = classifier.classify_crop(
+                    record["path"],
+                    detection.xyxy,
+                    detection.class_name,
+                    detection.class_id,
+                    detection.confidence,
+                )
                 estimate = estimate_parameters(
                     detection.xyxy,
                     image_width=width,
@@ -349,8 +362,8 @@ def _draw_detection(image, item: dict[str, Any]) -> None:
     box = item["detector"]["xyxy"]
     x1, y1, x2, y2 = [int(round(v)) for v in box]
     label = item["classification"]["class_name"]
-    confidence = item["detector"]["confidence"]
-    color = _box_color(label, item["detector"]["class_id"])
+    confidence = item["classification"]["confidence"]
+    color = _box_color(label, item["classification"]["class_id"])
     cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
     cv2.putText(
         image,
@@ -370,6 +383,7 @@ def _save_waterfall_detection_video(
     spectrogram_config: SpectrogramConfig,
     waterfall_config: WaterfallConfig,
     detector,
+    classifier,
 ) -> int:
     import cv2
 
@@ -391,19 +405,19 @@ def _save_waterfall_detection_video(
         if frame is None:
             continue
         for detection in predictions.get(frame_path, []):
-            x1, y1, x2, y2 = [int(round(v)) for v in detection.xyxy]
-            color = _box_color(detection.class_name, detection.class_id)
-            label = f"{detection.class_name} {detection.confidence:.2f}"
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(
+            classification = classifier.classify_crop(
+                frame_path,
+                detection.xyxy,
+                detection.class_name,
+                detection.class_id,
+                detection.confidence,
+            )
+            _draw_detection(
                 frame,
-                label,
-                (x1, max(12, y1 - 6)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                color,
-                1,
-                cv2.LINE_AA,
+                {
+                    "detector": asdict(detection),
+                    "classification": asdict(classification),
+                },
             )
         annotated_frames.append(frame)
 
@@ -457,8 +471,8 @@ def _save_mapped_waterfall_detection_video(
                 continue
 
             label = item["classification"]["class_name"]
-            confidence = item["detector"]["confidence"]
-            color = _box_color(label, item["detector"]["class_id"])
+            confidence = item["classification"]["confidence"]
+            color = _box_color(label, item["classification"]["class_id"])
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(
                 frame,
@@ -476,11 +490,21 @@ def _save_mapped_waterfall_detection_video(
 
 def _box_color(class_name: str, class_id: int) -> tuple[int, int, int]:
     name = str(class_name).lower()
-    if "ofdm" in name or class_id == 0:
+    if "ofdm" in name:
         return (0, 255, 255)
-    if "fhss" in name or class_id == 1:
+    if "fhss" in name:
         return (255, 0, 255)
-    return (80, 220, 120)
+    palette = [
+        (0, 255, 255),
+        (255, 0, 255),
+        (80, 220, 120),
+        (255, 180, 40),
+        (80, 160, 255),
+        (220, 120, 255),
+        (40, 220, 255),
+        (180, 255, 80),
+    ]
+    return palette[int(class_id) % len(palette)]
 
 
 def _guard_static_memory(iq_path: Path, metadata: IQMetadata, config: PipelineConfig) -> None:
