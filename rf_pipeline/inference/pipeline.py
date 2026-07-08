@@ -117,7 +117,9 @@ def run_pipeline(iq_path: Path, metadata: IQMetadata, config: PipelineConfig) ->
     infer_start = time.perf_counter()
     raw_detections = detector.predict([spectrogram_path])[spectrogram_path]
     infer_elapsed = time.perf_counter() - infer_start
-    for detection in raw_detections:
+    crop_dir = config.output_dir / "classification_crops"
+    for detection_index, detection in enumerate(raw_detections):
+        crop_path = _save_detection_crop(spectrogram_path, crop_dir / f"static_det_{detection_index:04d}.png", detection.xyxy)
         classification = classifier.classify_crop(
             spectrogram_path,
             detection.xyxy,
@@ -138,6 +140,7 @@ def run_pipeline(iq_path: Path, metadata: IQMetadata, config: PipelineConfig) ->
             {
                 "detector": asdict(detection),
                 "classification": asdict(classification),
+                "classification_crop_path": str(crop_path) if crop_path else None,
                 "parameters": asdict(estimate),
             }
         )
@@ -233,6 +236,7 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
     spectrogram_path = config.output_dir / "spectrogram.png"
     overlay_path = config.output_dir / "detections_overlay.png"
     segment_dir = config.output_dir / "segment_spectrograms"
+    crop_dir = config.output_dir / "classification_crops"
     segment_dir.mkdir(parents=True, exist_ok=True)
 
     detections: list[dict[str, Any]] = []
@@ -263,6 +267,11 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
             frame_start_sec = metadata.start_time_sec + record["start_sample"] / metadata.sample_rate_hz
             frame_end_sec = frame_start_sec + waterfall_config.window_samples / metadata.sample_rate_hz
             for detection in predictions.get(record["path"], []):
+                crop_path = _save_detection_crop(
+                    record["path"],
+                    crop_dir / f"frame_{record['frame_index']:06d}_det_{len(detections):06d}.png",
+                    detection.xyxy,
+                )
                 classification = classifier.classify_crop(
                     record["path"],
                     detection.xyxy,
@@ -285,6 +294,7 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
                     "frame_end_sec": frame_end_sec,
                     "detector": asdict(detection),
                     "classification": asdict(classification),
+                    "classification_crop_path": str(crop_path) if crop_path else None,
                     "parameters": asdict(estimate),
                 }
                 detections.append(item)
@@ -354,6 +364,26 @@ def _save_overlay(image_path: Path, overlay_path: Path, detections: list[dict[st
     overlay_path.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(overlay_path), image):
         raise RuntimeError(f"Failed to write overlay: {overlay_path}")
+
+
+def _save_detection_crop(image_path: Path, crop_path: Path, xyxy: tuple[float, float, float, float]) -> Path | None:
+    import cv2
+
+    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError(f"Cannot read image: {image_path}")
+    height, width = image.shape[:2]
+    x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
+    x1 = min(max(x1, 0), width)
+    x2 = min(max(x2, 0), width)
+    y1 = min(max(y1, 0), height)
+    y2 = min(max(y2, 0), height)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop_path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(crop_path), image[y1:y2, x1:x2]):
+        raise RuntimeError(f"Failed to write classification crop: {crop_path}")
+    return crop_path
 
 
 def _draw_detection(image, item: dict[str, Any]) -> None:
