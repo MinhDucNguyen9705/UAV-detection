@@ -335,6 +335,7 @@ def write_outputs(result, run_dir: Path, pipeline_mode: str, inference_source: s
                 "cls_class_id": item["classification"]["class_id"],
                 "cls_class_name": item["classification"]["class_name"],
                 "cls_confidence": item["classification"]["confidence"],
+                "cls_scores": json.dumps(item["classification"].get("scores") or {}, sort_keys=True),
                 "classification_crop_path": item.get("classification_crop_path", ""),
                 "x1": item["detector"]["xyxy"][0],
                 "y1": item["detector"]["xyxy"][1],
@@ -487,8 +488,8 @@ def build_app(config: AppConfig | None = None) -> gr.Blocks:
                     dynamic_range = gr.Slider(20, 120, value=70, step=5, label="Dynamic range (dB)")
                     colormap = gr.Dropdown(["hot", "jet", "turbo", "viridis", "gray"], value="hot", label="Colormap")
                 with gr.Row():
-                    image_width = gr.Number(value=960, label="Image width")
-                    image_height = gr.Number(value=720, label="Image height")
+                    image_width = gr.Number(value=1920, label="Image width")
+                    image_height = gr.Number(value=1440, label="Image height")
                 with gr.Row(visible=True) as segment_controls_group:
                     segment_duration = gr.Number(value=0.03, label="Segment duration (sec)")
                     segment_hop = gr.Number(value=0.01, label="Segment step / hop (sec)")

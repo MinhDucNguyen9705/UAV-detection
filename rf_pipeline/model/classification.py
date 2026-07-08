@@ -12,6 +12,7 @@ class ClassificationResult:
     class_id: int
     class_name: str
     confidence: float
+    scores: dict[str, float] | None = None
 
 
 class NullClassifier:
@@ -25,7 +26,12 @@ class NullClassifier:
         fallback_class_id: int = 0,
         fallback_confidence: float = 1.0,
     ) -> ClassificationResult:
-        return ClassificationResult(class_id=fallback_class_id, class_name=fallback_name, confidence=fallback_confidence)
+        return ClassificationResult(
+            class_id=fallback_class_id,
+            class_name=fallback_name,
+            confidence=fallback_confidence,
+            scores={fallback_name: fallback_confidence},
+        )
 
 
 class ImageClassifier:
@@ -94,6 +100,8 @@ class ImageClassifier:
         state_dict, metadata_model, names = _extract_checkpoint_parts(checkpoint)
         model_name = _infer_model_name(self.weights, metadata_model)
         num_classes = _infer_num_classes(state_dict, names)
+        if isinstance(checkpoint, dict) and checkpoint.get("imgsz"):
+            self.imgsz = int(checkpoint["imgsz"])
         self.model = _build_torchvision_model(model_name, num_classes)
         missing, unexpected = self.model.load_state_dict(_clean_state_dict(state_dict), strict=False)
         if missing and unexpected:
@@ -133,7 +141,12 @@ class ImageClassifier:
         y1 = min(max(y1, 0), height)
         y2 = min(max(y2, 0), height)
         if x2 <= x1 or y2 <= y1:
-            return ClassificationResult(class_id=fallback_class_id, class_name=fallback_name, confidence=fallback_confidence)
+            return ClassificationResult(
+                class_id=fallback_class_id,
+                class_name=fallback_name,
+                confidence=fallback_confidence,
+                scores={fallback_name: fallback_confidence},
+            )
         crop = image[y1:y2, x1:x2]
         if self.backend == "torchvision":
             return self._classify_torchvision(crop, fallback_name, fallback_class_id, fallback_confidence)
@@ -149,10 +162,24 @@ class ImageClassifier:
         result = self.model.predict(crop, imgsz=self.imgsz, device=self.device, verbose=False)[0]
         probs = getattr(result, "probs", None)
         if probs is None:
-            return ClassificationResult(class_id=fallback_class_id, class_name=fallback_name, confidence=fallback_confidence)
+            return ClassificationResult(
+                class_id=fallback_class_id,
+                class_name=fallback_name,
+                confidence=fallback_confidence,
+                scores={fallback_name: fallback_confidence},
+            )
         class_id = int(probs.top1)
         confidence = float(probs.top1conf)
-        return ClassificationResult(class_id=class_id, class_name=self.names.get(class_id, str(class_id)), confidence=confidence)
+        scores = {}
+        data = getattr(probs, "data", None)
+        if data is not None:
+            scores = {self.names.get(index, str(index)): float(score) for index, score in enumerate(data.detach().cpu().tolist())}
+        return ClassificationResult(
+            class_id=class_id,
+            class_name=self.names.get(class_id, str(class_id)),
+            confidence=confidence,
+            scores=scores or None,
+        )
 
     def _classify_torchvision(
         self,
@@ -171,10 +198,12 @@ class ImageClassifier:
             probs = torch.softmax(logits, dim=1)[0]
             confidence, class_id = torch.max(probs, dim=0)
         index = int(class_id.item())
+        scores = {self.names.get(i, str(i)): float(score) for i, score in enumerate(probs.detach().cpu().tolist())}
         return ClassificationResult(
             class_id=index,
             class_name=self.names.get(index, fallback_name if index == fallback_class_id else str(index)),
             confidence=float(confidence.item()),
+            scores=scores,
         )
 
 
