@@ -1,5 +1,3 @@
-"""Create waterfall videos by rendering sliding IQ windows."""
-
 from __future__ import annotations
 
 import shutil

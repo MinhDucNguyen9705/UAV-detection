@@ -1,12 +1,3 @@
-"""Raw IQ file IO.
-
-Supported layouts:
-- complex64: native numpy complex64 samples.
-- float32/int16: interleaved I,Q scalar values.
-
-The default mirrors the existing scripts in this repo: interleaved float32 IQ.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

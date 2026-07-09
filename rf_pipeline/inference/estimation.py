@@ -1,5 +1,3 @@
-"""Map spectrogram detections to time/frequency parameters."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

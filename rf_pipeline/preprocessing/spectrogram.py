@@ -1,5 +1,3 @@
-"""STFT spectrogram generation from complex IQ samples."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

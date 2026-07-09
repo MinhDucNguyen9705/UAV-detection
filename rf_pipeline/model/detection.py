@@ -1,5 +1,3 @@
-"""Detector interfaces for spectrogram images."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

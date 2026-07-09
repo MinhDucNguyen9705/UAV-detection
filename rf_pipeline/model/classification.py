@@ -1,8 +1,7 @@
-"""Optional second-stage classification for detected crops."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +39,7 @@ class ImageClassifier:
     Supports:
     - Ultralytics classification checkpoints.
     - Torchvision checkpoints/state_dicts for convnexttiny, efficientnetb0,
-      mobilenetv3_large, and mobilenetv3_small.
+      efficientnet_v2_s, mobilenetv3_large, and mobilenetv3_small.
     """
 
     def __init__(
@@ -57,6 +56,16 @@ class ImageClassifier:
         self.model: Any = None
         self.names: dict[int, str] = {}
         self._torch_transform = None
+        self._onnx_session = None
+        self._onnx_input_name = ""
+        self._onnx_output_name = ""
+
+        if self.weights.suffix.lower() == ".onnx":
+            if backend not in {"auto", "onnx"}:
+                raise RuntimeError(f"Backend {backend!r} cannot load ONNX classifier: {self.weights}")
+            self._init_onnx()
+            self.backend = "onnx"
+            return
 
         if backend in {"auto", "ultralytics"}:
             try:
@@ -121,6 +130,26 @@ class ImageClassifier:
             ]
         )
 
+    def _init_onnx(self) -> None:
+        import onnxruntime as ort
+
+        metadata = _load_onnx_metadata(self.weights)
+        if metadata.get("imgsz"):
+            self.imgsz = int(metadata["imgsz"])
+        classes = metadata.get("classes") or metadata.get("names") or []
+        if isinstance(classes, dict):
+            self.names = {int(k): str(v) for k, v in classes.items()}
+        elif isinstance(classes, list):
+            self.names = {index: str(name) for index, name in enumerate(classes)}
+        else:
+            self.names = {}
+
+        providers = _onnx_providers(self.device)
+        self._onnx_session = ort.InferenceSession(str(self.weights), providers=providers)
+        self._onnx_input_name = str(metadata.get("input_name") or self._onnx_session.get_inputs()[0].name)
+        outputs = self._onnx_session.get_outputs()
+        self._onnx_output_name = str(metadata.get("output_name") or outputs[0].name)
+
     def classify_crop(
         self,
         image_path: Path,
@@ -148,9 +177,45 @@ class ImageClassifier:
                 scores={fallback_name: fallback_confidence},
             )
         crop = image[y1:y2, x1:x2]
+        if self.backend == "onnx":
+            return self._classify_onnx(crop, fallback_name, fallback_class_id, fallback_confidence)
         if self.backend == "torchvision":
             return self._classify_torchvision(crop, fallback_name, fallback_class_id, fallback_confidence)
         return self._classify_ultralytics(crop, fallback_name, fallback_class_id, fallback_confidence)
+
+    def _classify_onnx(
+        self,
+        crop,
+        fallback_name: str,
+        fallback_class_id: int,
+        fallback_confidence: float,
+    ) -> ClassificationResult:
+        import cv2
+        import numpy as np
+
+        if self._onnx_session is None:
+            return ClassificationResult(
+                class_id=fallback_class_id,
+                class_name=fallback_name,
+                confidence=fallback_confidence,
+                scores={fallback_name: fallback_confidence},
+            )
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        resized = cv2.resize(rgb, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
+        mean = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
+        tensor = ((resized - mean) / std).transpose(2, 0, 1)[None, ...].astype(np.float32)
+        logits = self._onnx_session.run([self._onnx_output_name], {self._onnx_input_name: tensor})[0]
+        probs = _softmax(logits[0])
+        class_id = int(np.argmax(probs))
+        confidence = float(probs[class_id])
+        scores = {self.names.get(index, str(index)): float(score) for index, score in enumerate(probs.tolist())}
+        return ClassificationResult(
+            class_id=class_id,
+            class_name=self.names.get(class_id, fallback_name if class_id == fallback_class_id else str(class_id)),
+            confidence=confidence,
+            scores=scores,
+        )
 
     def _classify_ultralytics(
         self,
@@ -227,6 +292,38 @@ def _resolve_torch_device(device: str | None):
     return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
+def _load_onnx_metadata(path: Path) -> dict[str, Any]:
+    candidates = [
+        path.with_suffix(path.suffix + ".json"),
+        path.with_suffix(".json"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return json.loads(candidate.read_text(encoding="utf-8"))
+    return {}
+
+
+def _onnx_providers(device: str | None) -> list[str]:
+    try:
+        import onnxruntime as ort
+    except ImportError as exc:
+        raise RuntimeError("ONNX classifier inference requires `onnxruntime`. Install it before loading .onnx weights.") from exc
+
+    available = set(ort.get_available_providers())
+    if device and device != "cpu" and "CUDAExecutionProvider" in available:
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    return ["CPUExecutionProvider"]
+
+
+def _softmax(logits):
+    import numpy as np
+
+    values = np.asarray(logits, dtype=np.float32)
+    values = values - np.max(values)
+    exp = np.exp(values)
+    return exp / np.maximum(np.sum(exp), 1e-12)
+
+
 def _extract_checkpoint_parts(checkpoint) -> tuple[dict[str, Any], str | None, dict[int, str]]:
     if hasattr(checkpoint, "state_dict"):
         return checkpoint.state_dict(), checkpoint.__class__.__name__.lower(), {}
@@ -269,6 +366,8 @@ def _infer_model_name(path: Path, metadata_model: str | None) -> str:
         return "convnext_tiny"
     if "mobilenet" in text and ("v3" in text or "mobilenetv3" in text):
         return "mobilenet_v3_small" if "small" in text else "mobilenet_v3_large"
+    if "efficientnetv2s" in compact or "efficientnet_v2_s" in text:
+        return "efficientnet_v2_s"
     if "efficientnetb0" in compact or "efficientnet_b0" in text:
         return "efficientnet_b0"
     raise RuntimeError(f"Cannot infer torchvision architecture from {path.name}.")
@@ -300,6 +399,10 @@ def _build_torchvision_model(model_name: str, num_classes: int):
         return model
     if model_name == "efficientnet_b0":
         model = models.efficientnet_b0(weights=None)
+        model.classifier[1] = _linear_like(model.classifier[1], num_classes)
+        return model
+    if model_name == "efficientnet_v2_s":
+        model = models.efficientnet_v2_s(weights=None)
         model.classifier[1] = _linear_like(model.classifier[1], num_classes)
         return model
     if model_name == "convnext_tiny":

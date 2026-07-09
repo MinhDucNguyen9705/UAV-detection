@@ -1,18 +1,21 @@
-Optional place for local model weights.
+# Weights Model
 
-Default detector:
+Folder này là nơi đặt các model weights local để demo UI hoặc script inference sử dụng.
+
+Weights detector mặc định có thể đặt tại đây:
+
 - `yolo26n.pt`
+- `rtdetr-l.pt`
 
-Supported classifier weights:
+Weights classifier đang hỗ trợ:
+
 - `convnexttiny.pt`
 - `efficientnetb0.pt`
 - `mobilenetv3_large.pt`
 - `mobilenetv3_small.pt`
 
-The Gradio UI does not load these files at startup. Pass defaults when launching:
+Có thể tải weights tham khảo tại:
 
-```bash
-python demos/gradio_pipeline_app.py \
-  --detector-weight weights/yolo26n.pt \
-  --classifier-weight weights/mobilenetv3_small.pt
+```text
+https://www.kaggle.com/models/minhducnguyen9705/uav-signal/PyTorch/default/1
 ```

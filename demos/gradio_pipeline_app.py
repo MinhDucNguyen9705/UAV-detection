@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-"""Gradio UI for the raw IQ RF signal pipeline.
-
-Run locally:
-  python demos/gradio_pipeline_app.py
-
-Run on Kaggle/remote notebook:
-  python demos/gradio_pipeline_app.py --share
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -472,7 +462,7 @@ def build_app(config: AppConfig | None = None) -> gr.Blocks:
                 with gr.Row():
                     dtype = gr.Dropdown(["float32", "int16", "complex64"], value="float32", label="IQ dtype")
                     sample_rate = gr.Number(value=100_000_000, label="Sample rate (Hz)")
-                    center_frequency = gr.Number(value=2_400_000_000, label="Center frequency (Hz)")
+                    center_frequency = gr.Number(value=5_760_000_000, label="Center frequency (Hz)")
                 trim_enabled = gr.Checkbox(value=True, label="Use only a smaller time segment")
                 with gr.Row(visible=True) as trim_group:
                     trim_start = gr.Number(value=0.0, label="Start time (sec)")
@@ -518,7 +508,7 @@ def build_app(config: AppConfig | None = None) -> gr.Blocks:
                     f"Default 2-class detector from launch arg: `{config.detector_2class_weight}`"
                 )
                 with gr.Group(visible=False) as detector_upload_group:
-                    detector_upload = gr.File(label="Detector .pt", file_types=[".pt"], type="filepath")
+                    detector_upload = gr.File(label="Detector weight", file_types=[".pt", ".onnx"], type="filepath")
                 with gr.Group(visible=False) as detector_custom_group:
                     detector_path = gr.Textbox(label="Detector custom path", placeholder="/kaggle/working/weights/yolo26n.pt")
                 with gr.Row(visible=False) as classifier_group:
@@ -532,7 +522,7 @@ def build_app(config: AppConfig | None = None) -> gr.Blocks:
                         f"Default classifier from launch arg: `{config.classifier_weight}`"
                     )
                     with gr.Group(visible=False) as classifier_upload_group:
-                        classifier_upload = gr.File(label="Classifier .pt", file_types=[".pt"], type="filepath")
+                        classifier_upload = gr.File(label="Classifier weight", file_types=[".pt", ".onnx"], type="filepath")
                     with gr.Group(visible=False) as classifier_custom_group:
                         classifier_path = gr.Textbox(label="Classifier custom path", placeholder="/kaggle/working/weights/mobilenetv3_small.pt")
                 with gr.Group(visible=True) as inference_source_group:

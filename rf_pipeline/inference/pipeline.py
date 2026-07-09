@@ -1,5 +1,3 @@
-"""End-to-end raw IQ inference pipeline."""
-
 from __future__ import annotations
 
 import time
