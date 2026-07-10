@@ -21,6 +21,7 @@ class ClassificationCrop:
     fallback_name: str
     fallback_class_id: int = 0
     fallback_confidence: float = 0.0
+    image: Any | None = None
 
 
 class NullClassifier:
@@ -140,6 +141,9 @@ class ImageClassifier:
 
         device = _resolve_torch_device(self.device)
         self.model.to(device)
+        self._torch_use_half = _use_half_precision(self.device)
+        if self._torch_use_half:
+            self.model.half()
         self.model.eval()
         self._torch_device = device
         self._torch_transform = transforms.Compose(
@@ -218,7 +222,7 @@ class ImageClassifier:
         ]
         valid_crops = []
         for index, crop in enumerate(crops):
-            image = image_cache.get(crop.image_path)
+            image = crop.image if crop.image is not None else image_cache.get(crop.image_path)
             if image is None:
                 image = cv2.imread(str(crop.image_path), cv2.IMREAD_COLOR)
                 if image is None:
@@ -377,6 +381,8 @@ class ImageClassifier:
 
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         tensor = self._torch_transform(rgb).unsqueeze(0).to(self._torch_device)
+        if getattr(self, "_torch_use_half", False):
+            tensor = tensor.half()
         with torch.no_grad():
             logits = self.model(tensor)
             probs = torch.softmax(logits, dim=1)[0]
@@ -399,6 +405,8 @@ class ImageClassifier:
             rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
             tensors.append(self._torch_transform(rgb))
         batch = torch.stack(tensors, dim=0).to(self._torch_device)
+        if getattr(self, "_torch_use_half", False):
+            batch = batch.half()
         with torch.no_grad():
             logits = self.model(batch)
             probs_batch = torch.softmax(logits, dim=1)
@@ -433,6 +441,16 @@ def _resolve_torch_device(device: str | None):
             return torch.device(f"cuda:{device}" if torch.cuda.is_available() else "cpu")
         return torch.device(device)
     return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+
+def _use_half_precision(device: str | None) -> bool:
+    if not device or str(device).strip().lower() == "cpu":
+        return False
+    try:
+        import torch
+    except Exception:
+        return False
+    return torch.cuda.is_available()
 
 
 def _load_onnx_metadata(path: Path) -> dict[str, Any]:

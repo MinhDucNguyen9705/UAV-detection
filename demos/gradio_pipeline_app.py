@@ -341,6 +341,7 @@ def write_outputs(result, run_dir: Path, pipeline_mode: str, inference_source: s
                 "cls_class_id": item["classification"]["class_id"],
                 "cls_class_name": item["classification"]["class_name"],
                 "cls_confidence": item["classification"]["confidence"],
+                "confidence": item.get("confidence", item["classification"]["confidence"]),
                 "cls_scores": json.dumps(item["classification"].get("scores") or {}, sort_keys=True),
                 "classification_crop_path": item.get("classification_crop_path", ""),
                 "x1": item["detector"]["xyxy"][0],

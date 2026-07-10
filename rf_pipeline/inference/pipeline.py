@@ -43,6 +43,7 @@ class PipelineConfig:
     video_window_samples: int = 32768
     video_hop_samples: int = 8192
     video_fps: float = 24.0
+    save_classification_crops: bool = False
 
 
 @dataclass(slots=True)
@@ -113,9 +114,16 @@ def run_pipeline(iq_path: Path, metadata: IQMetadata, config: PipelineConfig) ->
     classifier = ImageClassifier(config.classifier_weights, device=config.device) if config.classifier_weights else NullClassifier()
     detections = []
     infer_start = time.perf_counter()
-    raw_detections = detector.predict([spectrogram_path])[spectrogram_path]
+    if hasattr(detector, "predict_images"):
+        try:
+            raw_detections = detector.predict_images([(spectrogram_path, frame.image)])[spectrogram_path]
+        except Exception:
+            raw_detections = detector.predict([spectrogram_path])[spectrogram_path]
+    else:
+        raw_detections = detector.predict([spectrogram_path])[spectrogram_path]
     detector_elapsed = time.perf_counter() - infer_start
     crop_dir = config.output_dir / "classification_crops"
+    has_classifier = bool(config.classifier_weights)
     classification_requests = [
         ClassificationCrop(
             image_path=spectrogram_path,
@@ -123,6 +131,7 @@ def run_pipeline(iq_path: Path, metadata: IQMetadata, config: PipelineConfig) ->
             fallback_name=detection.class_name,
             fallback_class_id=detection.class_id,
             fallback_confidence=detection.confidence,
+            image=frame.image,
         )
         for detection in raw_detections
     ]
@@ -131,7 +140,11 @@ def run_pipeline(iq_path: Path, metadata: IQMetadata, config: PipelineConfig) ->
     classify_elapsed = time.perf_counter() - classify_start
     infer_elapsed = detector_elapsed + classify_elapsed
     for detection_index, detection in enumerate(raw_detections):
-        crop_path = _save_detection_crop(spectrogram_path, crop_dir / f"static_det_{detection_index:04d}.png", detection.xyxy)
+        crop_path = (
+            _save_detection_crop_from_image(frame.image, crop_dir / f"static_det_{detection_index:04d}.png", detection.xyxy)
+            if config.save_classification_crops
+            else None
+        )
         classification = classifications[detection_index]
         estimate = estimate_parameters(
             detection.xyxy,
@@ -146,6 +159,7 @@ def run_pipeline(iq_path: Path, metadata: IQMetadata, config: PipelineConfig) ->
             {
                 "detector": asdict(detection),
                 "classification": asdict(classification),
+                "confidence": _combined_confidence(detection.confidence, classification.confidence, has_classifier),
                 "classification_crop_path": str(crop_path) if crop_path else None,
                 "parameters": asdict(estimate),
             }
@@ -239,6 +253,7 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
     else:
         detector = HeuristicSpectrogramDetector(class_name="signal")
     classifier = ImageClassifier(config.classifier_weights, device=config.device) if config.classifier_weights else NullClassifier()
+    has_classifier = bool(config.classifier_weights)
 
     from rf_pipeline.preprocessing import BrowserVideoWriter
 
@@ -267,7 +282,19 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
             return
         paths = [record["path"] for record in records]
         batch_start = time.perf_counter()
-        predictions = detector.predict(paths)
+        if hasattr(detector, "predict_images"):
+            try:
+                predictions = detector.predict_images([(record["path"], record["frame_meta"].image) for record in records])
+            except Exception:
+                for record in records:
+                    if not cv2.imwrite(str(record["path"]), record["frame_meta"].image):
+                        raise RuntimeError(f"Failed to write waterfall frame: {record['path']}")
+                predictions = detector.predict(paths)
+        else:
+            for record in records:
+                if not cv2.imwrite(str(record["path"]), record["frame_meta"].image):
+                    raise RuntimeError(f"Failed to write waterfall frame: {record['path']}")
+            predictions = detector.predict(paths)
         detector_batch_elapsed = time.perf_counter() - batch_start
         detector_elapsed_sec += detector_batch_elapsed
         inference_frame_count += len(records)
@@ -275,9 +302,7 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
         classification_requests: list[ClassificationCrop] = []
         pending_items = []
         for record in records:
-            frame_image = cv2.imread(str(record["path"]), cv2.IMREAD_COLOR)
-            if frame_image is None:
-                continue
+            frame_image = record["frame_meta"].image
             raw_writer.write(frame_image)
             annotated = frame_image.copy()
             height, width = annotated.shape[:2]
@@ -295,10 +320,14 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
                 "frame_end_sec": frame_end_sec,
             }
             for detection in predictions.get(record["path"], []):
-                crop_path = _save_detection_crop(
-                    record["path"],
-                    crop_dir / f"frame_{record['frame_index']:06d}_det_{len(detections) + len(pending_items):06d}.png",
-                    detection.xyxy,
+                crop_path = (
+                    _save_detection_crop_from_image(
+                        frame_image,
+                        crop_dir / f"frame_{record['frame_index']:06d}_det_{len(detections) + len(pending_items):06d}.png",
+                        detection.xyxy,
+                    )
+                    if config.save_classification_crops
+                    else None
                 )
                 classification_requests.append(
                     ClassificationCrop(
@@ -307,6 +336,7 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
                         fallback_name=detection.class_name,
                         fallback_class_id=detection.class_id,
                         fallback_confidence=detection.confidence,
+                        image=frame_image,
                     )
                 )
                 pending_items.append((record["path"], detection, crop_path))
@@ -341,6 +371,7 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
                 "frame_end_sec": frame_end_sec,
                 "detector": asdict(detection),
                 "classification": asdict(classification),
+                "confidence": _combined_confidence(detection.confidence, classification.confidence, has_classifier),
                 "classification_crop_path": str(crop_path) if crop_path else None,
                 "parameters": asdict(estimate),
             }
@@ -365,8 +396,6 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
         for start_sample, iq_window in iter_iq_windows(iq_path, metadata, waterfall_config.window_samples, waterfall_config.hop_samples):
             frame_meta = iq_to_spectrogram(iq_window, spectrogram_config)
             frame_path = segment_dir / f"segment_{frame_index:06d}.png"
-            if not cv2.imwrite(str(frame_path), frame_meta.image):
-                raise RuntimeError(f"Failed to write waterfall frame: {frame_path}")
             batch_records.append(
                 {
                     "frame_index": frame_index,
@@ -429,6 +458,12 @@ def _save_detection_crop(image_path: Path, crop_path: Path, xyxy: tuple[float, f
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError(f"Cannot read image: {image_path}")
+    return _save_detection_crop_from_image(image, crop_path, xyxy)
+
+
+def _save_detection_crop_from_image(image, crop_path: Path, xyxy: tuple[float, float, float, float]) -> Path | None:
+    import cv2
+
     height, width = image.shape[:2]
     x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
     x1 = min(max(x1, 0), width)
@@ -449,7 +484,7 @@ def _draw_detection(image, item: dict[str, Any]) -> None:
     box = item["detector"]["xyxy"]
     x1, y1, x2, y2 = [int(round(v)) for v in box]
     label = item["classification"]["class_name"]
-    confidence = item["classification"]["confidence"]
+    confidence = item.get("confidence", item["classification"]["confidence"])
     color = _box_color(label, item["classification"]["class_id"])
     cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
     cv2.putText(
@@ -462,6 +497,12 @@ def _draw_detection(image, item: dict[str, Any]) -> None:
         1,
         cv2.LINE_AA,
     )
+
+
+def _combined_confidence(detector_confidence: float, classifier_confidence: float, has_classifier: bool) -> float:
+    if not has_classifier:
+        return float(detector_confidence)
+    return float(detector_confidence) * float(classifier_confidence)
 
 
 def _save_waterfall_detection_video(
@@ -487,6 +528,7 @@ def _save_waterfall_detection_video(
         return 0
 
     predictions = detector.predict(frame_paths)
+    has_classifier = not isinstance(classifier, NullClassifier)
     for frame_path in frame_paths:
         frame = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
         if frame is None:
@@ -504,6 +546,7 @@ def _save_waterfall_detection_video(
                 {
                     "detector": asdict(detection),
                     "classification": asdict(classification),
+                    "confidence": _combined_confidence(detection.confidence, classification.confidence, has_classifier),
                 },
             )
         annotated_frames.append(frame)
@@ -558,7 +601,7 @@ def _save_mapped_waterfall_detection_video(
                 continue
 
             label = item["classification"]["class_name"]
-            confidence = item["classification"]["confidence"]
+            confidence = item.get("confidence", item["classification"]["confidence"])
             color = _box_color(label, item["classification"]["class_id"])
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(

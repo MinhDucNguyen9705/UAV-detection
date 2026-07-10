@@ -48,26 +48,40 @@ class UltralyticsDetector:
         self.device = device
         self.classes = classes
         self.batch = batch
+        self.half = _use_half_precision(device)
         is_onnx = Path(self.weights).suffix.lower() == ".onnx"
         if is_onnx:
             _validate_onnx_runtime_device(device)
         self.names = _load_onnx_names(Path(self.weights)) if is_onnx else {}
 
     def predict(self, image_paths: list[Path]) -> dict[Path, list[DetectionBox]]:
+        return self._predict_sources(
+            keys=image_paths,
+            sources=[str(path) for path in image_paths],
+        )
+
+    def predict_images(self, items: list[tuple[Path, np.ndarray]]) -> dict[Path, list[DetectionBox]]:
+        return self._predict_sources(
+            keys=[key for key, _ in items],
+            sources=[image for _, image in items],
+        )
+
+    def _predict_sources(self, keys: list[Path], sources) -> dict[Path, list[DetectionBox]]:
         results = self.model.predict(
-            source=[str(path) for path in image_paths],
+            source=sources,
             imgsz=self.imgsz,
             conf=self.conf,
             iou=self.iou,
             device=self.device,
             classes=self.classes,
             batch=self.batch,
+            half=self.half,
             stream=True,
             verbose=False,
         )
         out: dict[Path, list[DetectionBox]] = {}
         names = self.names or getattr(self.model, "names", {}) or {}
-        for image_path, result in zip(image_paths, results):
+        for image_path, result in zip(keys, results):
             boxes: list[DetectionBox] = []
             if result.boxes is not None and len(result.boxes) > 0:
                 for class_id, xyxy, confidence in zip(
@@ -132,6 +146,37 @@ class HeuristicSpectrogramDetector:
             out[path] = boxes
         return out
 
+    def predict_images(self, items: list[tuple[Path, np.ndarray]]) -> dict[Path, list[DetectionBox]]:
+        out: dict[Path, list[DetectionBox]] = {}
+        for path, image in items:
+            out[path] = self._predict_image(image)
+        return out
+
+    def _predict_image(self, image: np.ndarray) -> list[DetectionBox]:
+        import cv2
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        threshold = np.percentile(gray, self.percentile)
+        mask = (gray >= threshold).astype(np.uint8) * 255
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        boxes: list[DetectionBox] = []
+        height, width = gray.shape[:2]
+        for label_id in range(1, num_labels):
+            x, y, w, h, area = stats[label_id]
+            if int(area) < self.min_area:
+                continue
+            confidence = min(0.99, float(area) / float(width * height) * 20.0)
+            boxes.append(
+                DetectionBox(
+                    class_id=0,
+                    class_name=self.class_name,
+                    confidence=max(0.05, confidence),
+                    xyxy=(float(x), float(y), float(x + w), float(y + h)),
+                )
+            )
+        return boxes
+
 
 def _load_onnx_names(path: Path) -> dict[int, str]:
     for candidate in (path.with_suffix(path.suffix + ".json"), path.with_suffix(".json")):
@@ -165,3 +210,13 @@ def _validate_onnx_runtime_device(device: str | None) -> None:
             "ONNX detector was asked to run on GPU, but ONNX Runtime does not expose CUDAExecutionProvider. "
             "Install onnxruntime-gpu in this environment, or set Device to cpu."
         )
+
+
+def _use_half_precision(device: str | None) -> bool:
+    if not device or str(device).strip().lower() == "cpu":
+        return False
+    try:
+        import torch
+    except Exception:
+        return False
+    return torch.cuda.is_available()
