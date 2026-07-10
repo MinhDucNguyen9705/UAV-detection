@@ -31,6 +31,22 @@ class AppConfig:
     detector_2class_weight: str = "yolo26n.pt"
     detector_single_class_weight: str = "yolo26n_single.pt"
     classifier_weight: str = "mobilenetv3_small.pt"
+    device: str = ""
+
+
+def detect_default_device() -> str:
+    """Prefer the first CUDA GPU when PyTorch can see one."""
+
+    try:
+        import torch
+    except Exception:
+        return ""
+    return "0" if torch.cuda.is_available() else ""
+
+
+def resolve_device(device_text: str | None) -> str | None:
+    device = (device_text or "").strip()
+    return device or detect_default_device() or None
 
 
 def resolve_local_iq_path(raw_value: str) -> Path:
@@ -288,7 +304,7 @@ def resolve_weight_reference(value: str, role: str) -> Path:
         return path
     raise FileNotFoundError(
         f"Default {role} weight not found: {path}\n"
-        f"Launch with --{role}-weight /path/to/weight.pt, or choose Upload weight/Custom path in the UI."
+        f"Launch with --{role}-weight /path/to/weight.pt or .onnx, or choose Upload weight/Custom path in the UI."
     )
 
 
@@ -408,7 +424,7 @@ def inference_step(
         conf=float(conf),
         iou=float(iou),
         batch=int(batch_size),
-        device=device.strip() or None,
+        device=resolve_device(device),
         save_video=preprocess["output_mode"].startswith("Waterfall"),
         waterfall_detection_mode="per_frame" if waterfall_overlay_mode_label.startswith("Detect") else "map_static",
         video_window_samples=segment_samples,
@@ -544,7 +560,7 @@ def build_app(config: AppConfig | None = None) -> gr.Blocks:
                 with gr.Row():
                     conf = gr.Slider(0, 1, value=0.25, step=0.01, label="Confidence")
                     iou = gr.Slider(0, 1, value=0.70, step=0.01, label="IoU")
-                    device = gr.Textbox(label="Device", placeholder="empty, cpu, 0")
+                    device = gr.Textbox(value=config.device, label="Device", placeholder="empty, cpu, 0")
                 infer_button = gr.Button("Run detection and estimate", variant="primary")
 
             with gr.Tab("4. Results / Export", id="results"):
@@ -751,6 +767,7 @@ if __name__ == "__main__":
             detector_2class_weight=args.detector_2class_weight,
             detector_single_class_weight=args.detector_single_class_weight,
             classifier_weight=args.classifier_weight,
+            device=detect_default_device(),
         )
     ).queue().launch(
         share=args.share,

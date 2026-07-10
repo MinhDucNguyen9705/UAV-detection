@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Protocol
 
@@ -47,6 +48,10 @@ class UltralyticsDetector:
         self.device = device
         self.classes = classes
         self.batch = batch
+        is_onnx = Path(self.weights).suffix.lower() == ".onnx"
+        if is_onnx:
+            _validate_onnx_runtime_device(device)
+        self.names = _load_onnx_names(Path(self.weights)) if is_onnx else {}
 
     def predict(self, image_paths: list[Path]) -> dict[Path, list[DetectionBox]]:
         results = self.model.predict(
@@ -61,7 +66,7 @@ class UltralyticsDetector:
             verbose=False,
         )
         out: dict[Path, list[DetectionBox]] = {}
-        names = getattr(self.model, "names", {}) or {}
+        names = self.names or getattr(self.model, "names", {}) or {}
         for image_path, result in zip(image_paths, results):
             boxes: list[DetectionBox] = []
             if result.boxes is not None and len(result.boxes) > 0:
@@ -126,3 +131,37 @@ class HeuristicSpectrogramDetector:
                 )
             out[path] = boxes
         return out
+
+
+def _load_onnx_names(path: Path) -> dict[int, str]:
+    for candidate in (path.with_suffix(path.suffix + ".json"), path.with_suffix(".json")):
+        if not candidate.is_file():
+            continue
+        try:
+            metadata = json.loads(candidate.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        classes = metadata.get("classes") or metadata.get("names") or {}
+        if isinstance(classes, dict):
+            try:
+                return {int(key): str(value) for key, value in classes.items()}
+            except (TypeError, ValueError):
+                return {}
+        if isinstance(classes, list):
+            return {index: str(value) for index, value in enumerate(classes)}
+    return {}
+
+
+def _validate_onnx_runtime_device(device: str | None) -> None:
+    wants_cuda = bool(device and str(device).strip().lower() != "cpu")
+    if not wants_cuda:
+        return
+    try:
+        import onnxruntime as ort
+    except ImportError as exc:
+        raise RuntimeError("ONNX detector inference requires `onnxruntime` or `onnxruntime-gpu`.") from exc
+    if "CUDAExecutionProvider" not in set(ort.get_available_providers()):
+        raise RuntimeError(
+            "ONNX detector was asked to run on GPU, but ONNX Runtime does not expose CUDAExecutionProvider. "
+            "Install onnxruntime-gpu in this environment, or set Device to cpu."
+        )

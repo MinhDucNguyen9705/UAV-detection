@@ -144,8 +144,8 @@ class ImageClassifier:
         else:
             self.names = {}
 
-        providers = _onnx_providers(self.device)
-        self._onnx_session = ort.InferenceSession(str(self.weights), providers=providers)
+        providers, provider_options = _onnx_provider_config(self.device)
+        self._onnx_session = ort.InferenceSession(str(self.weights), providers=providers, provider_options=provider_options)
         self._onnx_input_name = str(metadata.get("input_name") or self._onnx_session.get_inputs()[0].name)
         outputs = self._onnx_session.get_outputs()
         self._onnx_output_name = str(metadata.get("output_name") or outputs[0].name)
@@ -303,16 +303,35 @@ def _load_onnx_metadata(path: Path) -> dict[str, Any]:
     return {}
 
 
-def _onnx_providers(device: str | None) -> list[str]:
+def _onnx_provider_config(device: str | None) -> tuple[list[str], list[dict[str, str]]]:
     try:
         import onnxruntime as ort
     except ImportError as exc:
         raise RuntimeError("ONNX classifier inference requires `onnxruntime`. Install it before loading .onnx weights.") from exc
 
     available = set(ort.get_available_providers())
-    if device and device != "cpu" and "CUDAExecutionProvider" in available:
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    return ["CPUExecutionProvider"]
+    wants_cuda = bool(device and str(device).strip().lower() != "cpu")
+    if wants_cuda and "CUDAExecutionProvider" not in available:
+        raise RuntimeError(
+            "ONNX classifier was asked to run on GPU, but ONNX Runtime does not expose CUDAExecutionProvider. "
+            "Install onnxruntime-gpu in this environment, or set Device to cpu."
+        )
+    if device != "cpu" and "CUDAExecutionProvider" in available:
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"], [{"device_id": str(_onnx_device_id(device))}, {}]
+    return ["CPUExecutionProvider"], [{}]
+
+
+def _onnx_device_id(device: str | None) -> int:
+    if not device:
+        return 0
+    text = str(device).strip().lower()
+    if text.isdigit():
+        return int(text)
+    if text.startswith("cuda:"):
+        suffix = text.split(":", 1)[1]
+        if suffix.isdigit():
+            return int(suffix)
+    return 0
 
 
 def _softmax(logits):
