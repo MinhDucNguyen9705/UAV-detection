@@ -261,7 +261,7 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
     classification_crop_count = 0
 
     def flush_batch(records: list[dict[str, Any]], raw_writer, annotated_writer) -> None:
-        nonlocal image_width, image_height, first_frame_saved, inference_elapsed_sec, inference_frame_count
+        nonlocal image_width, image_height, first_frame_saved, inference_elapsed_sec, inference_frame_count, detector_elapsed_sec
         nonlocal classification_elapsed_sec, classification_crop_count
         if not records:
             return
