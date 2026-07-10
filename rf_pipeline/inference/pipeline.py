@@ -486,17 +486,7 @@ def _draw_detection(image, item: dict[str, Any]) -> None:
     label = item["classification"]["class_name"]
     confidence = item.get("confidence", item["classification"]["confidence"])
     color = _box_color(label, item["classification"]["class_id"])
-    cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
-    cv2.putText(
-        image,
-        f"{label} {confidence:.2f}",
-        (x1, max(12, y1 - 6)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        color,
-        1,
-        cv2.LINE_AA,
-    )
+    _draw_labeled_box(image, x1, y1, x2, y2, f"{label} {confidence:.2f}", color)
 
 
 def _combined_confidence(detector_confidence: float, classifier_confidence: float, has_classifier: bool) -> float:
@@ -603,17 +593,7 @@ def _save_mapped_waterfall_detection_video(
             label = item["classification"]["class_name"]
             confidence = item.get("confidence", item["classification"]["confidence"])
             color = _box_color(label, item["classification"]["class_id"])
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(
-                frame,
-                f"{label} {confidence:.2f}",
-                (x1, max(12, y1 - 6)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                color,
-                1,
-                cv2.LINE_AA,
-            )
+            _draw_labeled_box(frame, x1, y1, x2, y2, f"{label} {confidence:.2f}", color)
         annotated_frames.append(frame)
     return save_frames_video(annotated_frames, path, fps=waterfall_config.fps, codec=waterfall_config.codec)
 
@@ -621,20 +601,56 @@ def _save_mapped_waterfall_detection_video(
 def _box_color(class_name: str, class_id: int) -> tuple[int, int, int]:
     name = str(class_name).lower()
     if "ofdm" in name:
-        return (0, 255, 255)
+        return (255, 80, 0)
     if "fhss" in name:
         return (255, 0, 255)
     palette = [
-        (0, 255, 255),
+        (255, 80, 0),
         (255, 0, 255),
-        (80, 220, 120),
-        (255, 180, 40),
+        (40, 255, 80),
         (80, 160, 255),
         (220, 120, 255),
-        (40, 220, 255),
-        (180, 255, 80),
+        (255, 255, 255),
+        (0, 255, 0),
+        (255, 0, 0),
     ]
     return palette[int(class_id) % len(palette)]
+
+
+def _draw_labeled_box(image, x1: int, y1: int, x2: int, y2: int, text: str, color: tuple[int, int, int]) -> None:
+    import cv2
+
+    height, width = image.shape[:2]
+    scale_base = max(width, height) / 960.0
+    thickness = max(2, int(round(2.2 * scale_base)))
+    font_scale = max(0.65, 0.48 * scale_base)
+    text_thickness = max(2, int(round(1.5 * scale_base)))
+    pad = max(4, int(round(5 * scale_base)))
+
+    x1 = min(max(x1, 0), width - 1)
+    x2 = min(max(x2, 0), width - 1)
+    y1 = min(max(y1, 0), height - 1)
+    y2 = min(max(y2, 0), height - 1)
+    cv2.rectangle(image, (x1, y1), (x2, y2), color, thickness)
+
+    (text_width, text_height), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_thickness)
+    label_x1 = x1
+    label_y2 = y1 - max(3, pad // 2)
+    label_y1 = label_y2 - text_height - baseline - 2 * pad
+    if label_y1 < 0:
+        label_y1 = min(height - 1, y2 + max(3, pad // 2))
+        label_y2 = min(height - 1, label_y1 + text_height + baseline + 2 * pad)
+    label_x2 = min(width - 1, label_x1 + text_width + 2 * pad)
+    if label_x2 >= width - 1:
+        label_x1 = max(0, width - text_width - 2 * pad - 1)
+        label_x2 = width - 1
+
+    bg_color = (20, 20, 20)
+    cv2.rectangle(image, (label_x1, label_y1), (label_x2, label_y2), bg_color, -1)
+    cv2.rectangle(image, (label_x1, label_y1), (label_x2, label_y2), color, max(1, thickness // 2))
+    text_org = (label_x1 + pad, label_y2 - baseline - pad)
+    cv2.putText(image, text, text_org, cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), text_thickness + 2, cv2.LINE_AA)
+    cv2.putText(image, text, text_org, cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, text_thickness, cv2.LINE_AA)
 
 
 def _guard_static_memory(iq_path: Path, metadata: IQMetadata, config: PipelineConfig) -> None:
