@@ -442,7 +442,7 @@ def inference_step(
     perf = result.performance
     status = (
         f"Done. Detections: {len(result.detections)}. "
-        f"Infer FPS: {perf.get('inference_fps', 0):.2f}, "
+        f"Pipeline FPS: {perf.get('inference_fps', 0):.2f}, "
         f"frames: {perf.get('inference_frames')}, time: {perf.get('inference_elapsed_sec', 0):.3f}s."
     )
     return (

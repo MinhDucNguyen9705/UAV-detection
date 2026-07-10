@@ -1,6 +1,6 @@
 """Model wrappers for detection and optional classification."""
 
-from .classification import ClassificationResult, ImageClassifier, NullClassifier
+from .classification import ClassificationCrop, ClassificationResult, ImageClassifier, NullClassifier
 from .classification_training import (
     CLASSIFICATION_MODEL_CHOICES,
     TORCHVISION_CLASSIFIERS,
@@ -13,6 +13,7 @@ from .detection import DetectionBox, HeuristicSpectrogramDetector, UltralyticsDe
 
 __all__ = [
     "CLASSIFICATION_MODEL_CHOICES",
+    "ClassificationCrop",
     "ClassificationResult",
     "ImageClassifier",
     "NullClassifier",

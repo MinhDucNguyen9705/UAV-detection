@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from rf_pipeline.data import IQMetadata, iter_iq_windows, load_iq_record
-from rf_pipeline.model import HeuristicSpectrogramDetector, ImageClassifier, NullClassifier, UltralyticsDetector
+from rf_pipeline.model import ClassificationCrop, HeuristicSpectrogramDetector, ImageClassifier, NullClassifier, UltralyticsDetector
 from rf_pipeline.preprocessing import (
     SpectrogramConfig,
     WaterfallConfig,
@@ -114,17 +114,25 @@ def run_pipeline(iq_path: Path, metadata: IQMetadata, config: PipelineConfig) ->
     detections = []
     infer_start = time.perf_counter()
     raw_detections = detector.predict([spectrogram_path])[spectrogram_path]
-    infer_elapsed = time.perf_counter() - infer_start
+    detector_elapsed = time.perf_counter() - infer_start
     crop_dir = config.output_dir / "classification_crops"
+    classification_requests = [
+        ClassificationCrop(
+            image_path=spectrogram_path,
+            xyxy=detection.xyxy,
+            fallback_name=detection.class_name,
+            fallback_class_id=detection.class_id,
+            fallback_confidence=detection.confidence,
+        )
+        for detection in raw_detections
+    ]
+    classify_start = time.perf_counter()
+    classifications = classifier.classify_crops(classification_requests)
+    classify_elapsed = time.perf_counter() - classify_start
+    infer_elapsed = detector_elapsed + classify_elapsed
     for detection_index, detection in enumerate(raw_detections):
         crop_path = _save_detection_crop(spectrogram_path, crop_dir / f"static_det_{detection_index:04d}.png", detection.xyxy)
-        classification = classifier.classify_crop(
-            spectrogram_path,
-            detection.xyxy,
-            detection.class_name,
-            detection.class_id,
-            detection.confidence,
-        )
+        classification = classifications[detection_index]
         estimate = estimate_parameters(
             detection.xyxy,
             image_width=image_width,
@@ -185,6 +193,11 @@ def run_pipeline(iq_path: Path, metadata: IQMetadata, config: PipelineConfig) ->
             "inference_frames": 1,
             "inference_elapsed_sec": infer_elapsed,
             "inference_fps": (1.0 / infer_elapsed) if infer_elapsed > 0 else None,
+            "detector_elapsed_sec": detector_elapsed,
+            "detector_fps": (1.0 / detector_elapsed) if detector_elapsed > 0 else None,
+            "classification_crops": len(classification_requests),
+            "classification_elapsed_sec": classify_elapsed,
+            "classification_fps": (len(classification_requests) / classify_elapsed) if classify_elapsed > 0 else None,
             "num_detections": len(detections),
             "batch_size": config.batch,
         },
@@ -243,16 +256,24 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
     first_frame_saved = False
     inference_elapsed_sec = 0.0
     inference_frame_count = 0
+    detector_elapsed_sec = 0.0
+    classification_elapsed_sec = 0.0
+    classification_crop_count = 0
 
     def flush_batch(records: list[dict[str, Any]], raw_writer, annotated_writer) -> None:
         nonlocal image_width, image_height, first_frame_saved, inference_elapsed_sec, inference_frame_count
+        nonlocal classification_elapsed_sec, classification_crop_count
         if not records:
             return
         paths = [record["path"] for record in records]
         batch_start = time.perf_counter()
         predictions = detector.predict(paths)
-        inference_elapsed_sec += time.perf_counter() - batch_start
+        detector_batch_elapsed = time.perf_counter() - batch_start
+        detector_elapsed_sec += detector_batch_elapsed
         inference_frame_count += len(records)
+        frame_data = {}
+        classification_requests: list[ClassificationCrop] = []
+        pending_items = []
         for record in records:
             frame_image = cv2.imread(str(record["path"]), cv2.IMREAD_COLOR)
             if frame_image is None:
@@ -264,43 +285,76 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
             image_height = height
             frame_start_sec = metadata.start_time_sec + record["start_sample"] / metadata.sample_rate_hz
             frame_end_sec = frame_start_sec + waterfall_config.window_samples / metadata.sample_rate_hz
+            frame_data[record["path"]] = {
+                "record": record,
+                "frame_image": frame_image,
+                "annotated": annotated,
+                "width": width,
+                "height": height,
+                "frame_start_sec": frame_start_sec,
+                "frame_end_sec": frame_end_sec,
+            }
             for detection in predictions.get(record["path"], []):
                 crop_path = _save_detection_crop(
                     record["path"],
-                    crop_dir / f"frame_{record['frame_index']:06d}_det_{len(detections):06d}.png",
+                    crop_dir / f"frame_{record['frame_index']:06d}_det_{len(detections) + len(pending_items):06d}.png",
                     detection.xyxy,
                 )
-                classification = classifier.classify_crop(
-                    record["path"],
-                    detection.xyxy,
-                    detection.class_name,
-                    detection.class_id,
-                    detection.confidence,
+                classification_requests.append(
+                    ClassificationCrop(
+                        image_path=record["path"],
+                        xyxy=detection.xyxy,
+                        fallback_name=detection.class_name,
+                        fallback_class_id=detection.class_id,
+                        fallback_confidence=detection.confidence,
+                    )
                 )
-                estimate = estimate_parameters(
-                    detection.xyxy,
-                    image_width=width,
-                    image_height=height,
-                    segment_start_sec=frame_start_sec,
-                    segment_end_sec=frame_end_sec,
-                    freq_min_hz=record["frame_meta"].freq_min_hz,
-                    freq_max_hz=record["frame_meta"].freq_max_hz,
-                )
-                item = {
-                    "frame_index": record["frame_index"],
-                    "frame_start_sec": frame_start_sec,
-                    "frame_end_sec": frame_end_sec,
-                    "detector": asdict(detection),
-                    "classification": asdict(classification),
-                    "classification_crop_path": str(crop_path) if crop_path else None,
-                    "parameters": asdict(estimate),
-                }
-                detections.append(item)
-                _draw_detection(annotated, item)
-            annotated_writer.write(annotated)
+                pending_items.append((record["path"], detection, crop_path))
+
+        classify_start = time.perf_counter()
+        classifications = classifier.classify_crops(classification_requests)
+        classify_batch_elapsed = time.perf_counter() - classify_start
+        classification_elapsed_sec += classify_batch_elapsed
+        inference_elapsed_sec += detector_batch_elapsed + classify_batch_elapsed
+        classification_crop_count += len(classification_requests)
+        for classification, (frame_path, detection, crop_path) in zip(classifications, pending_items):
+            data = frame_data.get(frame_path)
+            if data is None:
+                continue
+            record = data["record"]
+            width = data["width"]
+            height = data["height"]
+            frame_start_sec = data["frame_start_sec"]
+            frame_end_sec = data["frame_end_sec"]
+            estimate = estimate_parameters(
+                detection.xyxy,
+                image_width=width,
+                image_height=height,
+                segment_start_sec=frame_start_sec,
+                segment_end_sec=frame_end_sec,
+                freq_min_hz=record["frame_meta"].freq_min_hz,
+                freq_max_hz=record["frame_meta"].freq_max_hz,
+            )
+            item = {
+                "frame_index": record["frame_index"],
+                "frame_start_sec": frame_start_sec,
+                "frame_end_sec": frame_end_sec,
+                "detector": asdict(detection),
+                "classification": asdict(classification),
+                "classification_crop_path": str(crop_path) if crop_path else None,
+                "parameters": asdict(estimate),
+            }
+            detections.append(item)
+            _draw_detection(data["annotated"], item)
+
+        for record in records:
+            data = frame_data.get(record["path"])
+            if data is None:
+                continue
+            annotated_writer.write(data["annotated"])
             if not first_frame_saved:
-                cv2.imwrite(str(spectrogram_path), frame_image)
-                cv2.imwrite(str(overlay_path), annotated)
+                cv2.imwrite(str(spectrogram_path), data["frame_image"])
+                cv2.imwrite(str(overlay_path), data["annotated"])
                 first_frame_saved = True
 
     frame_index = 0
@@ -344,6 +398,11 @@ def run_waterfall_batch_pipeline(iq_path: Path, metadata: IQMetadata, config: Pi
             "inference_frames": inference_frame_count,
             "inference_elapsed_sec": inference_elapsed_sec,
             "inference_fps": (inference_frame_count / inference_elapsed_sec) if inference_elapsed_sec > 0 else None,
+            "detector_elapsed_sec": detector_elapsed_sec,
+            "detector_fps": (inference_frame_count / detector_elapsed_sec) if detector_elapsed_sec > 0 else None,
+            "classification_crops": classification_crop_count,
+            "classification_elapsed_sec": classification_elapsed_sec,
+            "classification_fps": (classification_crop_count / classification_elapsed_sec) if classification_elapsed_sec > 0 else None,
             "num_detections": len(detections),
             "batch_size": config.batch,
         },

@@ -14,6 +14,15 @@ class ClassificationResult:
     scores: dict[str, float] | None = None
 
 
+@dataclass(slots=True)
+class ClassificationCrop:
+    image_path: Path
+    xyxy: tuple[float, float, float, float]
+    fallback_name: str
+    fallback_class_id: int = 0
+    fallback_confidence: float = 0.0
+
+
 class NullClassifier:
     """Returns the detector class when no second-stage classifier is configured."""
 
@@ -31,6 +40,18 @@ class NullClassifier:
             confidence=fallback_confidence,
             scores={fallback_name: fallback_confidence},
         )
+
+    def classify_crops(self, crops: list[ClassificationCrop]) -> list[ClassificationResult]:
+        return [
+            self.classify_crop(
+                crop.image_path,
+                crop.xyxy,
+                crop.fallback_name,
+                crop.fallback_class_id,
+                crop.fallback_confidence,
+            )
+            for crop in crops
+        ]
 
 
 class ImageClassifier:
@@ -158,30 +179,61 @@ class ImageClassifier:
         fallback_class_id: int = 0,
         fallback_confidence: float = 0.0,
     ) -> ClassificationResult:
+        return self.classify_crops(
+            [
+                ClassificationCrop(
+                    image_path=image_path,
+                    xyxy=xyxy,
+                    fallback_name=fallback_name,
+                    fallback_class_id=fallback_class_id,
+                    fallback_confidence=fallback_confidence,
+                )
+            ]
+        )[0]
+
+    def classify_crops(self, crops: list[ClassificationCrop]) -> list[ClassificationResult]:
+        if not crops:
+            return []
+        fallback_results, valid_crops = self._prepare_crops(crops)
+        if not valid_crops:
+            return fallback_results
+        if self.backend == "onnx":
+            return self._classify_onnx_batch(fallback_results, valid_crops)
+        if self.backend == "torchvision":
+            return self._classify_torchvision_batch(fallback_results, valid_crops)
+        return self._classify_ultralytics_batch(fallback_results, valid_crops)
+
+    def _prepare_crops(self, crops: list[ClassificationCrop]):
         import cv2
 
-        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError(f"Cannot read image: {image_path}")
-        height, width = image.shape[:2]
-        x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
-        x1 = min(max(x1, 0), width)
-        x2 = min(max(x2, 0), width)
-        y1 = min(max(y1, 0), height)
-        y2 = min(max(y2, 0), height)
-        if x2 <= x1 or y2 <= y1:
-            return ClassificationResult(
-                class_id=fallback_class_id,
-                class_name=fallback_name,
-                confidence=fallback_confidence,
-                scores={fallback_name: fallback_confidence},
+        image_cache = {}
+        fallback_results = [
+            ClassificationResult(
+                class_id=crop.fallback_class_id,
+                class_name=crop.fallback_name,
+                confidence=crop.fallback_confidence,
+                scores={crop.fallback_name: crop.fallback_confidence},
             )
-        crop = image[y1:y2, x1:x2]
-        if self.backend == "onnx":
-            return self._classify_onnx(crop, fallback_name, fallback_class_id, fallback_confidence)
-        if self.backend == "torchvision":
-            return self._classify_torchvision(crop, fallback_name, fallback_class_id, fallback_confidence)
-        return self._classify_ultralytics(crop, fallback_name, fallback_class_id, fallback_confidence)
+            for crop in crops
+        ]
+        valid_crops = []
+        for index, crop in enumerate(crops):
+            image = image_cache.get(crop.image_path)
+            if image is None:
+                image = cv2.imread(str(crop.image_path), cv2.IMREAD_COLOR)
+                if image is None:
+                    raise ValueError(f"Cannot read image: {crop.image_path}")
+                image_cache[crop.image_path] = image
+            height, width = image.shape[:2]
+            x1, y1, x2, y2 = [int(round(v)) for v in crop.xyxy]
+            x1 = min(max(x1, 0), width)
+            x2 = min(max(x2, 0), width)
+            y1 = min(max(y1, 0), height)
+            y2 = min(max(y2, 0), height)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            valid_crops.append((index, image[y1:y2, x1:x2], crop))
+        return fallback_results, valid_crops
 
     def _classify_onnx(
         self,
@@ -217,6 +269,38 @@ class ImageClassifier:
             scores=scores,
         )
 
+    def _classify_onnx_batch(self, results: list[ClassificationResult], valid_crops) -> list[ClassificationResult]:
+        import numpy as np
+
+        if self._onnx_session is None:
+            return results
+        tensors = [self._preprocess_onnx_crop(crop) for _, crop, _ in valid_crops]
+        logits = self._onnx_session.run([self._onnx_output_name], {self._onnx_input_name: np.concatenate(tensors, axis=0)})[0]
+        if logits.ndim == 1:
+            logits = logits[None, :]
+        for row, (index, _, request) in zip(logits, valid_crops):
+            probs = _softmax(row)
+            class_id = int(np.argmax(probs))
+            confidence = float(probs[class_id])
+            scores = {self.names.get(i, str(i)): float(score) for i, score in enumerate(probs.tolist())}
+            results[index] = ClassificationResult(
+                class_id=class_id,
+                class_name=self.names.get(class_id, request.fallback_name if class_id == request.fallback_class_id else str(class_id)),
+                confidence=confidence,
+                scores=scores,
+            )
+        return results
+
+    def _preprocess_onnx_crop(self, crop):
+        import cv2
+        import numpy as np
+
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        resized = cv2.resize(rgb, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
+        mean = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
+        return ((resized - mean) / std).transpose(2, 0, 1)[None, ...].astype(np.float32)
+
     def _classify_ultralytics(
         self,
         crop,
@@ -246,6 +330,41 @@ class ImageClassifier:
             scores=scores or None,
         )
 
+    def _classify_ultralytics_batch(self, results: list[ClassificationResult], valid_crops) -> list[ClassificationResult]:
+        try:
+            predictions = self.model.predict(
+                [crop for _, crop, _ in valid_crops],
+                imgsz=self.imgsz,
+                device=self.device,
+                verbose=False,
+            )
+        except Exception:
+            for index, crop, request in valid_crops:
+                results[index] = self._classify_ultralytics(
+                    crop,
+                    request.fallback_name,
+                    request.fallback_class_id,
+                    request.fallback_confidence,
+                )
+            return results
+        for result, (index, _, request) in zip(predictions, valid_crops):
+            probs = getattr(result, "probs", None)
+            if probs is None:
+                continue
+            class_id = int(probs.top1)
+            confidence = float(probs.top1conf)
+            scores = {}
+            data = getattr(probs, "data", None)
+            if data is not None:
+                scores = {self.names.get(i, str(i)): float(score) for i, score in enumerate(data.detach().cpu().tolist())}
+            results[index] = ClassificationResult(
+                class_id=class_id,
+                class_name=self.names.get(class_id, str(class_id)),
+                confidence=confidence,
+                scores=scores or None,
+            )
+        return results
+
     def _classify_torchvision(
         self,
         crop,
@@ -270,6 +389,30 @@ class ImageClassifier:
             confidence=float(confidence.item()),
             scores=scores,
         )
+
+    def _classify_torchvision_batch(self, results: list[ClassificationResult], valid_crops) -> list[ClassificationResult]:
+        import cv2
+        import torch
+
+        tensors = []
+        for _, crop, _ in valid_crops:
+            rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+            tensors.append(self._torch_transform(rgb))
+        batch = torch.stack(tensors, dim=0).to(self._torch_device)
+        with torch.no_grad():
+            logits = self.model(batch)
+            probs_batch = torch.softmax(logits, dim=1)
+            confidences, class_ids = torch.max(probs_batch, dim=1)
+        for row, confidence, class_id, (index, _, request) in zip(probs_batch, confidences, class_ids, valid_crops):
+            class_index = int(class_id.item())
+            scores = {self.names.get(i, str(i)): float(score) for i, score in enumerate(row.detach().cpu().tolist())}
+            results[index] = ClassificationResult(
+                class_id=class_index,
+                class_name=self.names.get(class_index, request.fallback_name if class_index == request.fallback_class_id else str(class_index)),
+                confidence=float(confidence.item()),
+                scores=scores,
+            )
+        return results
 
 
 def _torch_load(path: Path, device: str | None):
